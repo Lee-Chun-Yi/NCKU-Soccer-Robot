@@ -4,6 +4,7 @@
 #include "LT.h"
 #include "graph.h"
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -137,96 +138,6 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
 	return cache;
 }
 
-struct PartialResult {
-	int posActive = 0;
-	int negActive = 0;
-	double depthWeightedPos = 0.0;
-	double depthWeightedNeg = 0.0;
-	int touched = 0;
-};
-
-struct FrontierNode {
-	int idx;
-	int depth;
-	int type; // +1 positive, -1 negative
-};
-
-static PartialResult runPartialDiffusion(const GraphCache& cache,
-	const vector<int>& posSeeds,
-	const vector<int>& negSeeds,
-	int maxDepth,
-	int visitLimit)
-{
-	PartialResult res;
-	const int N = static_cast<int>(cache.nodeIds.size());
-	if (N == 0) return res;
-	if (visitLimit <= 0) visitLimit = N;
-
-	vector<int8_t> state(N, 0);
-	vector<double> balance(N, 0.0);
-	vector<char> touched(N, 0);
-	queue<FrontierNode> q;
-
-	auto markTouched = [&](int idx) {
-		if (!touched[idx]) {
-			touched[idx] = 1;
-			++res.touched;
-		}
-	};
-
-	auto activate = [&](int idx, int type, int depth) {
-		state[idx] = static_cast<int8_t>(type);
-		markTouched(idx);
-		if (type == 1) {
-			++res.posActive;
-			res.depthWeightedPos += double(maxDepth - depth + 1);
-		} else {
-			++res.negActive;
-			res.depthWeightedNeg += double(maxDepth - depth + 1);
-		}
-		q.push({ idx, depth, type });
-	};
-
-	for (int idx : posSeeds)
-		if (idx >= 0 && idx < N && state[idx] == 0)
-			activate(idx, 1, 0);
-
-	for (int idx : negSeeds)
-		if (idx >= 0 && idx < N && state[idx] == 0)
-			activate(idx, -1, 0);
-
-	bool limitReached = res.touched >= visitLimit;
-	while (!q.empty() && !limitReached) {
-		FrontierNode cur = q.front();
-		q.pop();
-		if (cur.depth >= maxDepth) continue;
-		const auto& neighbors = cache.outAdj[cur.idx];
-		for (const auto& edge : neighbors) {
-			int v = edge.first;
-			double w = edge.second;
-			if (!touched[v]) {
-				touched[v] = 1;
-				++res.touched;
-				if (res.touched >= visitLimit) {
-					limitReached = true;
-				}
-			}
-			balance[v] += (cur.type == 1 ? w : -w);
-			if (state[v] != 0) continue;
-			double val = balance[v];
-			if (val >= cache.posThreshold[v]) {
-				activate(v, 1, cur.depth + 1);
-			}
-			else if (val <= cache.negThreshold[v]) {
-				activate(v, -1, cur.depth + 1);
-			}
-			if (limitReached) break;
-		}
-	}
-
-	return res;
-}
-
 static vector<double> computeNegExposure(const GraphCache& cache, const unordered_set<int>& negSeeds) {
 	vector<double> exposure(cache.nodeIds.size(), 0.0);
 	if (cache.nodeIds.empty() || negSeeds.empty()) return exposure;
@@ -237,6 +148,26 @@ static vector<double> computeNegExposure(const GraphCache& cache, const unordere
 			exposure[edge.first] += edge.second;
 	}
 	return exposure;
+}
+
+struct FullDiffResult {
+	size_t posActive = 0;
+	size_t negActive = 0;
+	double spread = 0.0;
+};
+
+static FullDiffResult runFullDiffusionSimulation(
+	DirectedGraph& G,
+	const unordered_set<int>& posSeeds,
+	const unordered_set<int>& negSeeds)
+{
+	FullDiffResult result;
+	unordered_set<int> finalPos, finalNeg;
+	diffuse_signed_all(&G, posSeeds, negSeeds, finalPos, finalNeg);
+	result.posActive = finalPos.size();
+	result.negActive = finalNeg.size();
+	result.spread = double(result.posActive) - double(result.negActive);
+	return result;
 }
 
 } // namespace student_algo_detail
@@ -257,31 +188,14 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 		return seeds;
 	}
 
-	const GraphCache cache = buildGraphCache(G);
-	const SeedInfo& info = getSeedInfo();
+        const auto startTime = chrono::steady_clock::now();
+        const chrono::milliseconds softTimeBudget(570000); // 9.5 minutes
+
+        const GraphCache cache = buildGraphCache(G);
+        const SeedInfo& info = getSeedInfo();
 
 	unordered_set<int> banned = info.negatives;
 	if (info.hasGiven) banned.insert(info.given);
-
-	vector<int> basePosIdx;
-	if (info.hasGiven) {
-		int idx = cache.indexOf(info.given);
-		if (idx >= 0) basePosIdx.push_back(idx);
-	}
-
-	vector<int> negSeedIdx;
-	negSeedIdx.reserve(info.negatives.size());
-	for (int neg : info.negatives) {
-		int idx = cache.indexOf(neg);
-		if (idx >= 0) negSeedIdx.push_back(idx);
-	}
-
-	constexpr int MAX_SIM_DEPTH = 3;
-	constexpr int MAX_VISIT = 2000;
-
-	PartialResult baseResult = runPartialDiffusion(cache, basePosIdx, negSeedIdx, MAX_SIM_DEPTH, MAX_VISIT);
-	const double baseSpread = double(baseResult.posActive - baseResult.negActive);
-	const double baseDepth = baseResult.depthWeightedPos - baseResult.depthWeightedNeg;
 
 	vector<double> negExposure = computeNegExposure(cache, info.negatives);
 
@@ -303,62 +217,127 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 		return cache.nodeIds[a] < cache.nodeIds[b];
 	});
 
-	const int MIN_SIM = 400;
-	const int MULTIPLIER = 60;
-	int simulateCount = static_cast<int>(order.size());
-	int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
-	if (simulateCount > targetSim) simulateCount = targetSim;
+        const int MIN_SIM = 400;
+        const int MULTIPLIER = 40;
+        const int MAX_SIM = 6000;
+        int simulateCount = static_cast<int>(order.size());
+        long long targetSim = static_cast<long long>(numberOfSeeds) * MULTIPLIER;
+        if (targetSim < MIN_SIM) targetSim = MIN_SIM;
+        if (targetSim > MAX_SIM) targetSim = MAX_SIM;
+        if (simulateCount > targetSim) simulateCount = static_cast<int>(targetSim);
 
-	vector<double> detailedScore(N, numeric_limits<double>::lowest());
-	vector<int> workingSeeds;
-	workingSeeds.reserve(basePosIdx.size() + 1);
-
-	for (int i = 0; i < simulateCount; ++i) {
+	vector<int> candidateNodes;
+	candidateNodes.reserve(simulateCount);
+	for (int i = 0; i < simulateCount && i < static_cast<int>(order.size()); ++i) {
 		int idx = order[i];
 		int nodeId = cache.nodeIds[idx];
 		if (banned.count(nodeId)) continue;
-
-		workingSeeds = basePosIdx;
-		workingSeeds.push_back(idx);
-
-		PartialResult result = runPartialDiffusion(cache, workingSeeds, negSeedIdx, MAX_SIM_DEPTH, MAX_VISIT);
-		double spreadGain = double(result.posActive - result.negActive) - baseSpread;
-		double depthGain = (result.depthWeightedPos - result.depthWeightedNeg) - baseDepth;
-		double score = spreadGain * 1.4 + depthGain * 0.45
-			+ cache.outStrength[idx] * 0.55
-			- cache.posThreshold[idx] * 0.35
-			- negExposure[idx] * 0.7;
-		detailedScore[idx] = score;
+		candidateNodes.push_back(nodeId);
 	}
-
-	struct CandidateScore {
-		int nodeId;
-		double score;
-	};
-	vector<CandidateScore> ranked;
-	ranked.reserve(N);
-	for (size_t idx = 0; idx < N; ++idx) {
-		int nodeId = cache.nodeIds[idx];
-		if (banned.count(nodeId)) continue;
-		double score = detailedScore[idx];
-		if (score == numeric_limits<double>::lowest()) score = fastScore[idx];
-		ranked.push_back({ nodeId, score });
-	}
-
-	sort(ranked.begin(), ranked.end(), [](const CandidateScore& a, const CandidateScore& b) {
-		if (a.score != b.score) return a.score > b.score;
-		return a.nodeId < b.nodeId;
-	});
-
-	for (const auto& cand : ranked) {
-		if (seeds.size() >= numberOfSeeds) break;
-		if (!banned.count(cand.nodeId)) seeds.insert(cand.nodeId);
-	}
-
-	if (seeds.size() < numberOfSeeds) {
+	if (candidateNodes.empty()) {
 		for (int nodeId : cache.nodeIds) {
-			if (seeds.size() >= numberOfSeeds) break;
 			if (banned.count(nodeId)) continue;
+			candidateNodes.push_back(nodeId);
+			if (static_cast<int>(candidateNodes.size()) >= targetSim) break;
+		}
+	}
+
+        unordered_set<int> negSeedSet = info.negatives;
+        unordered_set<int> workingSeeds;
+        if (info.hasGiven) workingSeeds.insert(info.given);
+
+        auto timeExceeded = [&]() {
+                return chrono::steady_clock::now() - startTime > softTimeBudget;
+        };
+
+        const size_t MIN_DIFF_RUNS = 800;
+        const size_t PER_SEED_RUNS = 30;
+        const size_t MAX_DIFF_RUNS = 6000;
+        size_t diffRunLimit = max(MIN_DIFF_RUNS, PER_SEED_RUNS * static_cast<size_t>(numberOfSeeds));
+        if (diffRunLimit > MAX_DIFF_RUNS) diffRunLimit = MAX_DIFF_RUNS;
+        size_t diffRuns = 0;
+
+        FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
+        ++diffRuns;
+        double currentSpread = baseResult.spread;
+        int iteration = 0;
+
+        struct CandidateEntry {
+                int nodeId;
+                double key;
+                double totalSpread;
+                int lastUpdate;
+                bool evaluated;
+        };
+        struct CandidateCompare {
+                bool operator()(const CandidateEntry& a, const CandidateEntry& b) const {
+                        if (a.key != b.key) return a.key < b.key;
+                        return a.nodeId > b.nodeId;
+                }
+        };
+
+        auto evaluateCandidate = [&](int nodeId, int iterationTag, CandidateEntry& out) {
+                if (diffRuns >= diffRunLimit || timeExceeded()) return false;
+                unordered_set<int> trialSeeds = workingSeeds;
+                trialSeeds.insert(nodeId);
+                FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
+                ++diffRuns;
+                out.nodeId = nodeId;
+                out.key = result.spread - currentSpread;
+                out.totalSpread = result.spread;
+                out.lastUpdate = iterationTag;
+                out.evaluated = true;
+                return true;
+        };
+
+        priority_queue<CandidateEntry, vector<CandidateEntry>, CandidateCompare> pq;
+        for (int nodeId : candidateNodes) {
+                if (workingSeeds.count(nodeId)) continue;
+                double heuristic = 0.0;
+                int idx = cache.indexOf(nodeId);
+                if (idx >= 0) heuristic = fastScore[idx];
+                pq.push(CandidateEntry{ nodeId, heuristic, 0.0, -1, false });
+        }
+
+        bool budgetExhausted = false;
+        while (seeds.size() < numberOfSeeds && !pq.empty()) {
+                CandidateEntry top = pq.top();
+                pq.pop();
+                if (workingSeeds.count(top.nodeId) || banned.count(top.nodeId)) continue;
+                if (!top.evaluated) {
+                        CandidateEntry evaluated = top;
+                        if (!evaluateCandidate(top.nodeId, iteration, evaluated)) {
+                                budgetExhausted = true;
+                                break;
+                        }
+                        pq.push(evaluated);
+                        continue;
+                }
+                if (top.lastUpdate == iteration) {
+                        seeds.insert(top.nodeId);
+                        workingSeeds.insert(top.nodeId);
+                        currentSpread = top.totalSpread;
+                        ++iteration;
+                }
+                else {
+                        CandidateEntry refreshed;
+                        if (!evaluateCandidate(top.nodeId, iteration, refreshed)) {
+                                budgetExhausted = true;
+                                break;
+                        }
+                        pq.push(refreshed);
+                }
+        }
+
+        if (budgetExhausted || timeExceeded()) {
+                while (!pq.empty()) pq.pop();
+        }
+
+        if (seeds.size() < numberOfSeeds) {
+                for (int idx : order) {
+                        if (seeds.size() >= numberOfSeeds) break;
+			int nodeId = cache.nodeIds[idx];
+			if (banned.count(nodeId) || seeds.count(nodeId)) continue;
 			seeds.insert(nodeId);
 		}
 	}
