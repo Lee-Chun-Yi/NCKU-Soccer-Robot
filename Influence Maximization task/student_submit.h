@@ -35,6 +35,12 @@ struct SeedInfo {
     unordered_set<int> negatives;
 };
 
+struct SelectionContext {
+    unordered_set<int> negatives;
+    bool hasGiven = false;
+    int given = -1;
+};
+
 static string joinPath(const string& dir, const string& file) {
     if (dir.empty()) return file;
     char tail = dir.back();
@@ -83,6 +89,14 @@ static const SeedInfo& getSeedInfo() {
     }
 
     return info;
+}
+
+static SelectionContext buildContextFromSeedInfo(const SeedInfo& info) {
+    SelectionContext ctx;
+    ctx.negatives = info.negatives;
+    ctx.hasGiven = info.hasGiven;
+    ctx.given = info.given;
+    return ctx;
 }
 
 // ---------------------------------------------------------
@@ -324,8 +338,6 @@ static FullDiffResult runFullDiffusionSimulation(
     return result;
 }
 
-} // namespace student_algo_detail
-
 // ---------------------------------------------------------
 // Main seed selection
 // ---------------------------------------------------------
@@ -338,8 +350,9 @@ static FullDiffResult runFullDiffusionSimulation(
  * Return an unordered_set<int> with exactly numberOfSeeds distinct positive seeds.
  * 回傳的 seeds 數量必須剛好等於 numberOfSeeds，且不得包含負向種子與 given_pos。
  */
-unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
-    using namespace student_algo_detail;
+static unordered_set<int> selectSeedsInternal(DirectedGraph& G,
+                                              unsigned int numberOfSeeds,
+                                              const SelectionContext& ctx) {
 
     unordered_set<int> seeds;
     if (numberOfSeeds == 0 || G.getSize() == 0) {
@@ -350,19 +363,18 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     const chrono::milliseconds softTimeBudget(570000); // 約 9.5 分鐘
 
     const GraphCache cache = buildGraphCache(G);
-    const SeedInfo& info = getSeedInfo();
 
-    unordered_set<int> banned = info.negatives;
-    if (info.hasGiven) banned.insert(info.given);
+    unordered_set<int> banned = ctx.negatives;
+    if (ctx.hasGiven) banned.insert(ctx.given);
 
     const size_t N = cache.nodeIds.size();
 
     // 基本負向曝露
-    vector<double> negExposure = computeNegExposure(cache, info.negatives);
+    vector<double> negExposure = computeNegExposure(cache, ctx.negatives);
     // PageRank / k-shell / 負向距離
     vector<double> pageRank = computePageRank(cache, 20, 0.85);
     vector<int> shellIndex = computeShellIndex(cache);
-    vector<double> negDistanceScore = computeNegDistanceScore(cache, info.negatives);
+    vector<double> negDistanceScore = computeNegDistanceScore(cache, ctx.negatives);
 
     // legacy heuristic（類似你原本的 fastScore）
     vector<double> legacyHeuristic(N, 0.0);
@@ -454,11 +466,11 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         order.push_back(static_cast<int>(i));
     }
 
-    unordered_set<int> negSeedSet = info.negatives;
+    unordered_set<int> negSeedSet = ctx.negatives;
     unordered_set<int> workingSeeds;
-    if (info.hasGiven) {
-        workingSeeds.insert(info.given);
-        applyDiversityPenalty(info.given);
+    if (ctx.hasGiven) {
+        workingSeeds.insert(ctx.given);
+        applyDiversityPenalty(ctx.given);
     }
 
     // 以 currentHeuristic 排序
@@ -726,6 +738,27 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     }
 
     return seeds;
+}
+
+} // namespace student_algo_detail
+
+unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
+    using namespace student_algo_detail;
+    const SeedInfo& info = getSeedInfo();
+    SelectionContext ctx = buildContextFromSeedInfo(info);
+    return selectSeedsInternal(G, numberOfSeeds, ctx);
+}
+
+unordered_set<int> seedSelection(DirectedGraph& G,
+                                 unsigned int numberOfSeeds,
+                                 int givenPosSeed,
+                                 const unordered_set<int>& givenNegSeeds) {
+    using namespace student_algo_detail;
+    SelectionContext ctx;
+    ctx.hasGiven = true;
+    ctx.given = givenPosSeed;
+    ctx.negatives = givenNegSeeds;
+    return selectSeedsInternal(G, numberOfSeeds, ctx);
 }
 
 #endif
