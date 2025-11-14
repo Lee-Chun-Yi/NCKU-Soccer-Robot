@@ -4,6 +4,7 @@
 #include "LT.h"
 #include "graph.h"
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -126,10 +127,10 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
         }
 
         sort(adj.begin(), adj.end(),
-            [](const pair<int, double>& a, const pair<int, double>& b) {
-                if (a.first != b.first) return a.first < b.first;
-                return a.second < b.second;
-            });
+             [](const pair<int, double>& a, const pair<int, double>& b) {
+                 if (a.first != b.first) return a.first < b.first;
+                 return a.second < b.second;
+             });
 
         cache.outStrength[i] = total;
     }
@@ -176,10 +177,11 @@ static FullDiffResult runFullDiffusionSimulation(
 /*
  * seedSelection:
  *   - G: graph instance
- *   - numberOfSeeds: how many positive seeds to select
- *                     (including possibly one given positive from given_pos.txt)
+ *   - numberOfSeeds: number of positive seeds to select
+ *                     (may include one given positive from given_pos.txt)
  *
- * Return an unordered_set<int> of exactly numberOfSeeds distinct positive seeds.
+ * Return an unordered_set<int> with exactly numberOfSeeds distinct positive seeds.
+ * 回傳的 seed 數量必須剛好等於 numberOfSeeds，且不得包含負向種子與 given_pos。
  */
 unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     using namespace student_algo_detail;
@@ -188,6 +190,9 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     if (numberOfSeeds == 0 || G.getSize() == 0) {
         return seeds;
     }
+
+    const auto startTime = chrono::steady_clock::now();
+    const chrono::milliseconds softTimeBudget(570000); // 約 9.5 分鐘軟性時間上限
 
     const GraphCache cache = buildGraphCache(G);
     const SeedInfo& info = getSeedInfo();
@@ -217,13 +222,15 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         return cache.nodeIds[a] < cache.nodeIds[b];
     });
 
-    const int MIN_SIM = 150;
-    const int MULTIPLIER = 10;
-    const int MAX_SIM = 1200;
+    // How many candidates to consider with full diffusion simulations
+    const int MIN_SIM = 400;
+    const int MULTIPLIER = 40;
+    const int MAX_SIM = 6000;
     int simulateCount = static_cast<int>(order.size());
-    int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
+    long long targetSim = static_cast<long long>(numberOfSeeds) * MULTIPLIER;
+    if (targetSim < MIN_SIM) targetSim = MIN_SIM;
     if (targetSim > MAX_SIM) targetSim = MAX_SIM;
-    if (simulateCount > targetSim) simulateCount = targetSim;
+    if (simulateCount > targetSim) simulateCount = static_cast<int>(targetSim);
 
     vector<int> candidateNodes;
     candidateNodes.reserve(simulateCount);
@@ -244,35 +251,51 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     unordered_set<int> negSeedSet = info.negatives;
     unordered_set<int> workingSeeds;
     if (info.hasGiven) workingSeeds.insert(info.given);
+
+    auto timeExceeded = [&]() {
+        return chrono::steady_clock::now() - startTime > softTimeBudget;
+    };
+
+    // Diffusion run budget
+    const size_t MIN_DIFF_RUNS = 800;
+    const size_t PER_SEED_RUNS = 30;
+    const size_t MAX_DIFF_RUNS = 6000;
+    size_t diffRunLimit =
+        max(MIN_DIFF_RUNS, PER_SEED_RUNS * static_cast<size_t>(numberOfSeeds));
+    if (diffRunLimit > MAX_DIFF_RUNS) diffRunLimit = MAX_DIFF_RUNS;
+    size_t diffRuns = 0;
+
     FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
+    ++diffRuns;
     double currentSpread = baseResult.spread;
     int iteration = 0;
 
     struct CandidateEntry {
         int nodeId;
-        double key;         // priority key (marginal gain or heuristic)
-        double totalSpread; // total spread when selected
+        double key;         // marginal gain or heuristic
+        double totalSpread; // total spread if selected
         int lastUpdate;     // iteration when last evaluated
-        bool evaluated;     // whether full simulation evaluated
+        bool evaluated;     // true if full simulation done
     };
     struct CandidateCompare {
         bool operator()(const CandidateEntry& a, const CandidateEntry& b) const {
-            if (a.key != b.key) return a.key < b.key;
+            if (a.key != b.key) return a.key < b.key;   // max-heap via priority_queue
             return a.nodeId > b.nodeId;
         }
     };
 
-    auto evaluateCandidate = [&](int nodeId, int iterationTag) {
+    auto evaluateCandidate = [&](int nodeId, int iterationTag, CandidateEntry& out) {
+        if (diffRuns >= diffRunLimit || timeExceeded()) return false;
         unordered_set<int> trialSeeds = workingSeeds;
         trialSeeds.insert(nodeId);
         FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
-        CandidateEntry entry;
-        entry.nodeId = nodeId;
-        entry.key = result.spread - currentSpread;
-        entry.totalSpread = result.spread;
-        entry.lastUpdate = iterationTag;
-        entry.evaluated = true;
-        return entry;
+        ++diffRuns;
+        out.nodeId = nodeId;
+        out.key = result.spread - currentSpread;
+        out.totalSpread = result.spread;
+        out.lastUpdate = iterationTag;
+        out.evaluated = true;
+        return true;
     };
 
     priority_queue<CandidateEntry, vector<CandidateEntry>, CandidateCompare> pq;
@@ -284,26 +307,44 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         pq.push(CandidateEntry{ nodeId, heuristic, 0.0, -1, false });
     }
 
+    bool budgetExhausted = false;
     while (seeds.size() < numberOfSeeds && !pq.empty()) {
         CandidateEntry top = pq.top();
         pq.pop();
         if (workingSeeds.count(top.nodeId) || banned.count(top.nodeId)) continue;
 
         if (!top.evaluated) {
-            pq.push(evaluateCandidate(top.nodeId, iteration));
+            CandidateEntry evaluated = top;
+            if (!evaluateCandidate(top.nodeId, iteration, evaluated)) {
+                budgetExhausted = true;
+                break;
+            }
+            pq.push(evaluated);
             continue;
         }
 
         if (top.lastUpdate == iteration) {
+            // Accept this candidate
             seeds.insert(top.nodeId);
             workingSeeds.insert(top.nodeId);
             currentSpread = top.totalSpread;
             ++iteration;
         } else {
-            pq.push(evaluateCandidate(top.nodeId, iteration));
+            // Re-evaluate with updated workingSeeds
+            CandidateEntry refreshed;
+            if (!evaluateCandidate(top.nodeId, iteration, refreshed)) {
+                budgetExhausted = true;
+                break;
+            }
+            pq.push(refreshed);
         }
     }
 
+    if (budgetExhausted || timeExceeded()) {
+        while (!pq.empty()) pq.pop();
+    }
+
+    // Fallback: fill remaining seeds greedily by heuristic score if budget/time exhausted
     if (seeds.size() < numberOfSeeds) {
         for (int idx : order) {
             if (seeds.size() >= numberOfSeeds) break;
