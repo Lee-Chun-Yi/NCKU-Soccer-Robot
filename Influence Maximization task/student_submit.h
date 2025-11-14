@@ -578,10 +578,11 @@ static unordered_set<int> selectSeedsInternal(DirectedGraph& G,
         if (remainingSeeds == 0) return true;
         if (candidateIdx.size() > 4000) return false;  // EG4000 閾值
 
-        long long requiredRuns =
-            static_cast<long long>(candidateIdx.size()) *
-            static_cast<long long>(remainingSeeds);
-        if (requiredRuns + diffRuns > static_cast<long long>(diffRunLimit)) {
+        size_t requiredRuns = candidateIdx.size() * remainingSeeds;
+        size_t availableRuns = (diffRunLimit > diffRuns)
+                                   ? (diffRunLimit - diffRuns)
+                                   : static_cast<size_t>(0);
+        if (requiredRuns > availableRuns) {
             return false;
         }
 
