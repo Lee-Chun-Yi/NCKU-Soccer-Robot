@@ -3,9 +3,13 @@
 
 #include "LT.h"
 #include "graph.h"
+
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <fstream>
+#include <functional>
 #include <iterator>
 #include <limits>
 #include <queue>
@@ -18,6 +22,10 @@
 using namespace std;
 
 namespace student_algo_detail {
+
+// ---------------------------------------------------------
+// Seed file handling
+// ---------------------------------------------------------
 
 struct SeedInfo {
     bool loaded = false;
@@ -77,13 +85,28 @@ static const SeedInfo& getSeedInfo() {
     return info;
 }
 
+// ---------------------------------------------------------
+// Graph cache for faster access
+// ---------------------------------------------------------
+
 struct GraphCache {
     vector<int> nodeIds;
     unordered_map<int, int> idToIndex;
+
+    // Directed graph
     vector<vector<pair<int, double>>> outAdj;
+    vector<vector<pair<int, double>>> inAdj;
+
+    // Undirected view (for k-core / distance / diversity)
+    vector<vector<pair<int, double>>> undirectedAdj;
+
+    // Node attributes
     vector<double> posThreshold;
     vector<double> negThreshold;
     vector<double> outStrength;
+    vector<double> inStrength;
+    vector<int> outDegree;
+    vector<int> inDegree;
 
     int indexOf(int nodeId) const {
         auto it = idToIndex.find(nodeId);
@@ -104,9 +127,14 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
 
     size_t N = cache.nodeIds.size();
     cache.outAdj.assign(N, {});
+    cache.inAdj.assign(N, {});
+    cache.undirectedAdj.assign(N, {});
     cache.posThreshold.assign(N, 0.0);
     cache.negThreshold.assign(N, 0.0);
     cache.outStrength.assign(N, 0.0);
+    cache.inStrength.assign(N, 0.0);
+    cache.outDegree.assign(N, 0);
+    cache.inDegree.assign(N, 0);
 
     for (size_t i = 0; i < N; ++i) {
         int nodeId = cache.nodeIds[i];
@@ -123,7 +151,17 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
             total += w;
             auto it = cache.idToIndex.find(nb);
             if (it == cache.idToIndex.end()) continue;
-            adj.emplace_back(it->second, w);
+            int j = it->second;
+
+            adj.emplace_back(j, w);
+            cache.inAdj[j].emplace_back(static_cast<int>(i), w);
+
+            cache.undirectedAdj[i].emplace_back(j, w);
+            cache.undirectedAdj[j].emplace_back(static_cast<int>(i), w);
+
+            ++cache.outDegree[i];
+            ++cache.inDegree[j];
+            cache.inStrength[j] += w;
         }
 
         sort(adj.begin(), adj.end(),
@@ -138,6 +176,10 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
     return cache;
 }
 
+// ---------------------------------------------------------
+// Helper metrics
+// ---------------------------------------------------------
+
 static vector<double> computeNegExposure(const GraphCache& cache,
                                          const unordered_set<int>& negSeeds) {
     vector<double> exposure(cache.nodeIds.size(), 0.0);
@@ -151,6 +193,116 @@ static vector<double> computeNegExposure(const GraphCache& cache,
     }
     return exposure;
 }
+
+static vector<double> computePageRank(const GraphCache& cache,
+                                      int iterations = 20,
+                                      double damping = 0.85) {
+    const size_t N = cache.nodeIds.size();
+    vector<double> rank(N, N == 0 ? 0.0 : 1.0 / double(N));
+    if (N == 0) return rank;
+
+    vector<double> next(N, 0.0);
+    for (int it = 0; it < iterations; ++it) {
+        double base = (1.0 - damping) / double(N);
+        fill(next.begin(), next.end(), base);
+
+        double dangling = 0.0;
+        for (size_t i = 0; i < N; ++i) {
+            if (cache.outAdj[i].empty()) dangling += rank[i];
+        }
+        double danglingShare = damping * dangling / double(N);
+        for (size_t i = 0; i < N; ++i) next[i] += danglingShare;
+
+        for (size_t i = 0; i < N; ++i) {
+            if (cache.outAdj[i].empty() || cache.outStrength[i] <= 0) continue;
+            double push = damping * rank[i] / cache.outStrength[i];
+            for (const auto& edge : cache.outAdj[i]) {
+                next[edge.first] += push * edge.second;
+            }
+        }
+        rank.swap(next);
+    }
+    return rank;
+}
+
+static vector<int> computeShellIndex(const GraphCache& cache) {
+    const size_t N = cache.nodeIds.size();
+    vector<int> shell(N, 0);
+    if (N == 0) return shell;
+
+    vector<int> degree(N, 0);
+    for (size_t i = 0; i < N; ++i) {
+        degree[i] = static_cast<int>(cache.outAdj[i].size() + cache.inAdj[i].size());
+    }
+
+    vector<char> removed(N, 0);
+    priority_queue<pair<int, int>,
+                   vector<pair<int, int>>,
+                   greater<pair<int, int>>> pq;
+    for (size_t i = 0; i < N; ++i) {
+        pq.emplace(degree[i], static_cast<int>(i));
+    }
+
+    int currentShell = 0;
+    while (!pq.empty()) {
+        auto [deg, idx] = pq.top();
+        pq.pop();
+        if (removed[idx]) continue;
+        removed[idx] = 1;
+        if (deg > currentShell) currentShell = deg;
+        shell[idx] = currentShell;
+
+        for (const auto& edge : cache.undirectedAdj[idx]) {
+            int nb = edge.first;
+            if (removed[nb] || degree[nb] == 0) continue;
+            --degree[nb];
+            pq.emplace(degree[nb], nb);
+        }
+    }
+    return shell;
+}
+
+static vector<double> computeNegDistanceScore(const GraphCache& cache,
+                                              const unordered_set<int>& negSeeds) {
+    const size_t N = cache.nodeIds.size();
+    vector<double> distanceScore(N, 0.0);
+    if (N == 0 || negSeeds.empty()) return distanceScore;
+
+    const int INF = numeric_limits<int>::max();
+    vector<int> dist(N, INF);
+    queue<int> q;
+
+    for (int nodeId : negSeeds) {
+        int idx = cache.indexOf(nodeId);
+        if (idx < 0 || dist[idx] == 0) continue;
+        dist[idx] = 0;
+        q.push(idx);
+    }
+
+    const int MAX_DEPTH = 6;
+    while (!q.empty()) {
+        int cur = q.front();
+        q.pop();
+        int d = dist[cur];
+        if (d >= MAX_DEPTH) continue;
+        for (const auto& edge : cache.undirectedAdj[cur]) {
+            int nb = edge.first;
+            if (dist[nb] <= d + 1) continue;
+            dist[nb] = d + 1;
+            q.push(nb);
+        }
+    }
+
+    for (size_t i = 0; i < N; ++i) {
+        if (dist[i] == INF) continue;
+        distanceScore[i] = exp(-0.45 * double(dist[i]));
+    }
+    return distanceScore;
+}
+
+// ---------------------------------------------------------
+// Full diffusion wrapper
+// ---------------------------------------------------------
 
 struct FullDiffResult {
     size_t posActive = 0;
@@ -174,6 +326,9 @@ static FullDiffResult runFullDiffusionSimulation(
 
 } // namespace student_algo_detail
 
+// ---------------------------------------------------------
+// Main seed selection
+// ---------------------------------------------------------
 /*
  * seedSelection:
  *   - G: graph instance
@@ -181,7 +336,7 @@ static FullDiffResult runFullDiffusionSimulation(
  *                     (may include one given positive from given_pos.txt)
  *
  * Return an unordered_set<int> with exactly numberOfSeeds distinct positive seeds.
- * 回傳的 seed 數量必須剛好等於 numberOfSeeds，且不得包含負向種子與 given_pos。
+ * 回傳的 seeds 數量必須剛好等於 numberOfSeeds，且不得包含負向種子與 given_pos。
  */
 unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     using namespace student_algo_detail;
@@ -192,7 +347,7 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     }
 
     const auto startTime = chrono::steady_clock::now();
-    const chrono::milliseconds softTimeBudget(570000); // 約 9.5 分鐘軟性時間上限
+    const chrono::milliseconds softTimeBudget(570000); // 約 9.5 分鐘
 
     const GraphCache cache = buildGraphCache(G);
     const SeedInfo& info = getSeedInfo();
@@ -200,29 +355,130 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     unordered_set<int> banned = info.negatives;
     if (info.hasGiven) banned.insert(info.given);
 
-    vector<double> negExposure = computeNegExposure(cache, info.negatives);
-
     const size_t N = cache.nodeIds.size();
-    vector<double> fastScore(N, 0.0);
+
+    // 基本負向曝露
+    vector<double> negExposure = computeNegExposure(cache, info.negatives);
+    // PageRank / k-shell / 負向距離
+    vector<double> pageRank = computePageRank(cache, 20, 0.85);
+    vector<int> shellIndex = computeShellIndex(cache);
+    vector<double> negDistanceScore = computeNegDistanceScore(cache, info.negatives);
+
+    // legacy heuristic（類似你原本的 fastScore）
+    vector<double> legacyHeuristic(N, 0.0);
     for (size_t idx = 0; idx < N; ++idx) {
-        double score = cache.outStrength[idx];
-        score += 0.05 * double(cache.outAdj[idx].size());
-        score -= 0.55 * cache.posThreshold[idx];
-        if (!negExposure.empty()) score -= 0.8 * negExposure[idx];
-        fastScore[idx] = score;
+        double legacy = cache.outStrength[idx];
+        legacy += 0.05 * double(cache.outAdj[idx].size());
+        legacy -= 0.55 * cache.posThreshold[idx];
+        if (!negExposure.empty()) legacy -= 0.8 * negExposure[idx];
+        legacyHeuristic[idx] = legacy;
     }
 
+    // feature-based heuristic
+    vector<double> featureHeuristic(N, 0.0);
+    for (size_t idx = 0; idx < N; ++idx) {
+        double feature = 0.55 * cache.outStrength[idx];
+        feature += 0.65 * cache.inStrength[idx];
+        feature += 0.20 * double(cache.outAdj[idx].size());
+        feature += 0.22 * double(cache.inAdj[idx].size());
+        feature += 0.60 * sqrt((cache.outStrength[idx] + 1e-6) *
+                               (cache.inStrength[idx] + 1e-6));
+        feature += 1.50 * double(shellIndex[idx]);
+        feature += 3.00 * pageRank[idx] * double(N);
+
+        if (!negExposure.empty())     feature -= 0.60 * negExposure[idx];
+        if (!negDistanceScore.empty()) feature -= 0.40 * negDistanceScore[idx];
+        feature -= 0.40 * cache.posThreshold[idx];
+        feature -= 0.25 * cache.negThreshold[idx];
+
+        featureHeuristic[idx] = feature;
+    }
+
+    // 混合 heuristic
+    vector<double> baseHeuristic(N, 0.0);
+    for (size_t idx = 0; idx < N; ++idx) {
+        baseHeuristic[idx] = 0.80 * legacyHeuristic[idx] + 0.20 * featureHeuristic[idx];
+    }
+
+    // Diversity penalty 相關資料
+    vector<double> diversityPenalty(N, 0.0);
+    vector<int> visitMarker(N, 0);
+    int visitToken = 1;
+    int penaltyVersion = 0;
+    constexpr int DIVERSITY_DEPTH = 3;
+    const double DIVERSITY_BASE = 1.6;
+    const double DIVERSITY_DECAY = 0.7;
+    array<double, DIVERSITY_DEPTH + 1> depthPenalty{};
+    depthPenalty[0] = DIVERSITY_BASE;
+    for (int d = 1; d <= DIVERSITY_DEPTH; ++d) {
+        depthPenalty[d] = depthPenalty[d - 1] * DIVERSITY_DECAY;
+    }
+
+    auto applyDiversityPenalty = [&](int nodeId) {
+        int idx = cache.indexOf(nodeId);
+        if (idx < 0) return;
+        ++penaltyVersion;
+        ++visitToken;
+
+        queue<pair<int, int>> bfs;
+        bfs.emplace(idx, 0);
+        visitMarker[idx] = visitToken;
+
+        while (!bfs.empty()) {
+            auto [cur, depth] = bfs.front();
+            bfs.pop();
+            if (depth > DIVERSITY_DEPTH) continue;
+            diversityPenalty[cur] += depthPenalty[depth];
+
+            if (depth == DIVERSITY_DEPTH) continue;
+            for (const auto& edge : cache.undirectedAdj[cur]) {
+                int nb = edge.first;
+                if (visitMarker[nb] == visitToken) continue;
+                visitMarker[nb] = visitToken;
+                bfs.emplace(nb, depth + 1);
+            }
+        }
+    };
+
+    auto currentHeuristic = [&](int idx) {
+        double penalty = diversityPenalty[idx];
+        double cap = 0.35 * fabs(baseHeuristic[idx]);
+        if (penalty > cap) penalty = cap;
+        return baseHeuristic[idx] - penalty;
+    };
+
+    // 排序 index 列表
     vector<int> order;
     order.reserve(N);
     for (size_t i = 0; i < N; ++i) {
         order.push_back(static_cast<int>(i));
     }
+
+    unordered_set<int> negSeedSet = info.negatives;
+    unordered_set<int> workingSeeds;
+    if (info.hasGiven) {
+        workingSeeds.insert(info.given);
+        applyDiversityPenalty(info.given);
+    }
+
+    // 以 currentHeuristic 排序
     sort(order.begin(), order.end(), [&](int a, int b) {
-        if (fastScore[a] != fastScore[b]) return fastScore[a] > fastScore[b];
+        double sa = currentHeuristic(a);
+        double sb = currentHeuristic(b);
+        if (sa != sb) return sa > sb;
         return cache.nodeIds[a] < cache.nodeIds[b];
     });
 
-    // How many candidates to consider with full diffusion simulations
+    // legacy order（僅依 legacyHeuristic）
+    vector<int> legacyOrder = order;
+    sort(legacyOrder.begin(), legacyOrder.end(), [&](int a, int b) {
+        double sa = legacyHeuristic[a];
+        double sb = legacyHeuristic[b];
+        if (sa != sb) return sa > sb;
+        return cache.nodeIds[a] < cache.nodeIds[b];
+    });
+
+    // 決定需要模擬的 candidate 數量
     const int MIN_SIM = 400;
     const int MULTIPLIER = 40;
     const int MAX_SIM = 6000;
@@ -230,61 +486,153 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     long long targetSim = static_cast<long long>(numberOfSeeds) * MULTIPLIER;
     if (targetSim < MIN_SIM) targetSim = MIN_SIM;
     if (targetSim > MAX_SIM) targetSim = MAX_SIM;
-    if (simulateCount > targetSim) simulateCount = static_cast<int>(targetSim);
+    if (simulateCount > targetSim && order.size() > 2000) {
+        simulateCount = static_cast<int>(targetSim);
+    }
 
-    vector<int> candidateNodes;
-    candidateNodes.reserve(simulateCount);
+    vector<char> candidateUsed(N, 0);
+    vector<int> candidateIdx;
+    candidateIdx.reserve(simulateCount);
+
     for (int i = 0; i < simulateCount && i < static_cast<int>(order.size()); ++i) {
         int idx = order[i];
         int nodeId = cache.nodeIds[idx];
         if (banned.count(nodeId)) continue;
-        candidateNodes.push_back(nodeId);
-    }
-    if (candidateNodes.empty()) {
-        for (int nodeId : cache.nodeIds) {
-            if (banned.count(nodeId)) continue;
-            candidateNodes.push_back(nodeId);
-            if (static_cast<int>(candidateNodes.size()) >= targetSim) break;
-        }
+        candidateIdx.push_back(idx);
+        candidateUsed[idx] = 1;
     }
 
-    unordered_set<int> negSeedSet = info.negatives;
-    unordered_set<int> workingSeeds;
-    if (info.hasGiven) workingSeeds.insert(info.given);
+    for (int idx : legacyOrder) {
+        if (static_cast<int>(candidateIdx.size()) >= simulateCount) break;
+        if (candidateUsed[idx]) continue;
+        int nodeId = cache.nodeIds[idx];
+        if (banned.count(nodeId)) continue;
+        candidateIdx.push_back(idx);
+        candidateUsed[idx] = 1;
+    }
+
+    if (candidateIdx.empty()) {
+        for (int nodeId : cache.nodeIds) {
+            if (banned.count(nodeId)) continue;
+            int idx = cache.indexOf(nodeId);
+            if (idx < 0) continue;
+            candidateIdx.push_back(idx);
+            if (static_cast<int>(candidateIdx.size()) >= targetSim) break;
+        }
+    }
 
     auto timeExceeded = [&]() {
         return chrono::steady_clock::now() - startTime > softTimeBudget;
     };
 
-    // Diffusion run budget
-    const size_t MIN_DIFF_RUNS = 800;
-    const size_t PER_SEED_RUNS = 30;
-    const size_t MAX_DIFF_RUNS = 6000;
+    auto recomputeHeuristic = [&](int nodeId) {
+        int idx = cache.indexOf(nodeId);
+        if (idx < 0) return 0.0;
+        return currentHeuristic(idx);
+    };
+
+    // diffusion run budget
+    const size_t MIN_DIFF_RUNS = 1500;
+    const size_t PER_SEED_RUNS = 80;
+    const size_t MAX_DIFF_RUNS = 12000;
     size_t diffRunLimit =
         max(MIN_DIFF_RUNS, PER_SEED_RUNS * static_cast<size_t>(numberOfSeeds));
     if (diffRunLimit > MAX_DIFF_RUNS) diffRunLimit = MAX_DIFF_RUNS;
     size_t diffRuns = 0;
+
+    if (cache.nodeIds.size() <= 2000) {
+        size_t remainingSeedsMax = (numberOfSeeds > 0) ? numberOfSeeds : 1;
+        size_t exhaustiveNeed = candidateIdx.size() * remainingSeedsMax;
+        if (exhaustiveNeed > diffRunLimit) {
+            diffRunLimit = min<size_t>(MAX_DIFF_RUNS, exhaustiveNeed + 10);
+        }
+    }
 
     FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
     ++diffRuns;
     double currentSpread = baseResult.spread;
     int iteration = 0;
 
+    // -----------------------------------------------------
+    // Exhaustive greedy (若圖不大且預算許可)
+    // -----------------------------------------------------
+    auto exhaustiveGreedy = [&]() {
+        size_t remainingSeeds =
+            (numberOfSeeds > seeds.size()) ? (numberOfSeeds - seeds.size()) : 0;
+        if (remainingSeeds == 0) return true;
+        if (candidateIdx.size() > 4000) return false;  // EG4000 閾值
+
+        long long requiredRuns =
+            static_cast<long long>(candidateIdx.size()) *
+            static_cast<long long>(remainingSeeds);
+        if (requiredRuns + diffRuns > static_cast<long long>(diffRunLimit)) {
+            return false;
+        }
+
+        while (seeds.size() < numberOfSeeds) {
+            int bestNode = -1;
+            FullDiffResult bestResult = baseResult;
+            double bestSpread = currentSpread;
+            bool resourceBlocked = false;
+
+            for (int idx : candidateIdx) {
+                int nodeId = cache.nodeIds[idx];
+                if (banned.count(nodeId) || workingSeeds.count(nodeId)) continue;
+                if (diffRuns >= diffRunLimit || timeExceeded()) {
+                    resourceBlocked = true;
+                    break;
+                }
+                unordered_set<int> trialSeeds = workingSeeds;
+                trialSeeds.insert(nodeId);
+                FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
+                ++diffRuns;
+                if (result.spread > bestSpread) {
+                    bestSpread = result.spread;
+                    bestNode = nodeId;
+                    bestResult = result;
+                }
+            }
+
+            if (bestNode == -1) {
+                if (resourceBlocked) return false;
+                break;
+            }
+
+            seeds.insert(bestNode);
+            workingSeeds.insert(bestNode);
+            applyDiversityPenalty(bestNode);
+            currentSpread = bestResult.spread;
+            baseResult = bestResult;
+            ++iteration;
+        }
+        return seeds.size() >= numberOfSeeds;
+    };
+
+    if (exhaustiveGreedy() && seeds.size() >= numberOfSeeds) {
+        return seeds;
+    }
+
+    // -----------------------------------------------------
+    // Lazy greedy with priority queue
+    // -----------------------------------------------------
     struct CandidateEntry {
         int nodeId;
         double key;         // marginal gain or heuristic
-        double totalSpread; // total spread if selected
-        int lastUpdate;     // iteration when last evaluated
-        bool evaluated;     // true if full simulation done
+        double totalSpread; // spread if selected
+        int lastUpdate;     // iteration when evaluated
+        bool evaluated;
+        int penaltyStamp;   // for diversity penalty version tracking
     };
     struct CandidateCompare {
         bool operator()(const CandidateEntry& a, const CandidateEntry& b) const {
-            if (a.key != b.key) return a.key < b.key;   // max-heap via priority_queue
+            if (a.key != b.key) return a.key < b.key;
             return a.nodeId > b.nodeId;
         }
     };
 
-    auto evaluateCandidate = [&](int nodeId, int iterationTag, CandidateEntry& out) {
+    auto evaluateCandidate = [&](int nodeId,
+                                 int iterationTag,
+                                 CandidateEntry& out) -> bool {
         if (diffRuns >= diffRunLimit || timeExceeded()) return false;
         unordered_set<int> trialSeeds = workingSeeds;
         trialSeeds.insert(nodeId);
@@ -295,16 +643,16 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         out.totalSpread = result.spread;
         out.lastUpdate = iterationTag;
         out.evaluated = true;
+        out.penaltyStamp = penaltyVersion;
         return true;
     };
 
     priority_queue<CandidateEntry, vector<CandidateEntry>, CandidateCompare> pq;
-    for (int nodeId : candidateNodes) {
+    for (int idx : candidateIdx) {
+        int nodeId = cache.nodeIds[idx];
         if (workingSeeds.count(nodeId)) continue;
-        double heuristic = 0.0;
-        int idx = cache.indexOf(nodeId);
-        if (idx >= 0) heuristic = fastScore[idx];
-        pq.push(CandidateEntry{ nodeId, heuristic, 0.0, -1, false });
+        double heuristic = currentHeuristic(idx);
+        pq.push(CandidateEntry{ nodeId, heuristic, 0.0, -1, false, penaltyVersion });
     }
 
     bool budgetExhausted = false;
@@ -314,6 +662,14 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         if (workingSeeds.count(top.nodeId) || banned.count(top.nodeId)) continue;
 
         if (!top.evaluated) {
+            // 若 diversity penalty 已更新，先重算 heuristic 再排隊
+            if (top.penaltyStamp != penaltyVersion) {
+                double freshKey = recomputeHeuristic(top.nodeId);
+                top.key = freshKey;
+                top.penaltyStamp = penaltyVersion;
+                pq.push(top);
+                continue;
+            }
             CandidateEntry evaluated = top;
             if (!evaluateCandidate(top.nodeId, iteration, evaluated)) {
                 budgetExhausted = true;
@@ -324,13 +680,14 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         }
 
         if (top.lastUpdate == iteration) {
-            // Accept this candidate
+            // 接受此 candidate
             seeds.insert(top.nodeId);
             workingSeeds.insert(top.nodeId);
+            applyDiversityPenalty(top.nodeId);
             currentSpread = top.totalSpread;
             ++iteration;
         } else {
-            // Re-evaluate with updated workingSeeds
+            // 重新評估（因為 workingSeeds 已改變）
             CandidateEntry refreshed;
             if (!evaluateCandidate(top.nodeId, iteration, refreshed)) {
                 budgetExhausted = true;
@@ -344,13 +701,27 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         while (!pq.empty()) pq.pop();
     }
 
-    // Fallback: fill remaining seeds greedily by heuristic score if budget/time exhausted
+    // -----------------------------------------------------
+    // Fallback：只靠 heuristic 填滿剩餘 seeds
+    // -----------------------------------------------------
     if (seeds.size() < numberOfSeeds) {
-        for (int idx : order) {
+        vector<int> fallback = candidateIdx;
+        sort(fallback.begin(), fallback.end(), [&](int a, int b) {
+            double sa = currentHeuristic(a);
+            double sb = currentHeuristic(b);
+            if (sa != sb) return sa > sb;
+            return cache.nodeIds[a] < cache.nodeIds[b];
+        });
+
+        for (int idx : fallback) {
             if (seeds.size() >= numberOfSeeds) break;
             int nodeId = cache.nodeIds[idx];
-            if (banned.count(nodeId) || seeds.count(nodeId)) continue;
+            if (banned.count(nodeId) || seeds.count(nodeId) || workingSeeds.count(nodeId)) {
+                continue;
+            }
             seeds.insert(nodeId);
+            workingSeeds.insert(nodeId);
+            applyDiversityPenalty(nodeId);
         }
     }
 
