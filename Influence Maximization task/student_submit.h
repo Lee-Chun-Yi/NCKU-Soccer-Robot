@@ -314,14 +314,7 @@ static unordered_set<int> runSeedSelection(
 
 } // namespace student_algo_detail
 
-/*
- * seedSelection:
- *   - G:   ��i��
- *   - numberOfSeeds: �ݭn�A�諸�u�B�~���V�ؤl�ƶq�v
- *                     �]�t�Υt�~�|�A�[�W 1 �� given_pos.txt �̪� positive seed�^
- *
- * �A�u�ݭn�^�Ǥ@�� unordered_set<int>�A�̭��� numberOfSeeds 9��positivate seed�s���C
- */
+
 
 unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         using namespace student_algo_detail;
