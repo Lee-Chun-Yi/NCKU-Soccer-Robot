@@ -108,31 +108,25 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
 	cache.negThreshold.assign(N, 0.0);
 	cache.outStrength.assign(N, 0.0);
 
-	for (size_t i = 0; i < N; ++i) {
-		int nodeId = cache.nodeIds[i];
-		cache.posThreshold[i] = G.getNodeThreshold(nodeId);
-		cache.negThreshold[i] = G.getNodeThreshold2(nodeId);
+        for (size_t i = 0; i < N; ++i) {
+                int nodeId = cache.nodeIds[i];
+                cache.posThreshold[i] = G.getNodeThreshold(nodeId);
+                cache.negThreshold[i] = G.getNodeThreshold2(nodeId);
 
-		vector<int> outs = G.getNodeOutNeighbors(nodeId);
-		auto& adj = cache.outAdj[i];
-		adj.reserve(outs.size());
+                vector<int> outs = G.getNodeOutNeighbors(nodeId);
+                auto& adj = cache.outAdj[i];
+                adj.reserve(outs.size());
 
-		double total = 0.0;
-		for (int nb : outs) {
-			double w = G.getEdgeInfluence(nodeId, nb);
-			total += w;
-			auto it = cache.idToIndex.find(nb);
-			if (it == cache.idToIndex.end()) continue;
-			adj.emplace_back(it->second, w);
-		}
-
-		sort(adj.begin(), adj.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
-			if (a.first != b.first) return a.first < b.first;
-			return a.second < b.second;
-		});
-
-		cache.outStrength[i] = total;
-	}
+                double total = 0.0;
+                for (int nb : outs) {
+                        double w = G.getEdgeInfluence(nodeId, nb);
+                        total += w;
+                        auto it = cache.idToIndex.find(nb);
+                        if (it == cache.idToIndex.end()) continue;
+                        adj.emplace_back(it->second, w);
+                }
+                cache.outStrength[i] = total;
+        }
 
 	return cache;
 }
@@ -199,11 +193,12 @@ static unordered_set<int> runSeedSelection(
         vector<double> negExposure = computeNegExposure(cache, info.negatives);
 
         vector<double> fastScore(N, 0.0);
+        const bool hasNegExposure = !negExposure.empty();
         for (size_t idx = 0; idx < N; ++idx) {
                 double score = cache.outStrength[idx];
                 score += 0.05 * double(cache.outAdj[idx].size());
                 score -= 0.55 * cache.posThreshold[idx];
-                if (!negExposure.empty()) score -= 0.8 * negExposure[idx];
+                if (hasNegExposure) score -= 0.8 * negExposure[idx];
                 fastScore[idx] = score;
         }
 
@@ -215,28 +210,6 @@ static unordered_set<int> runSeedSelection(
                 return cache.nodeIds[a] < cache.nodeIds[b];
         });
 
-        const int MIN_SIM = 400;
-        const int MULTIPLIER = 60;
-        int simulateCount = static_cast<int>(order.size());
-        int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
-        if (simulateCount > targetSim) simulateCount = targetSim;
-
-        vector<int> candidateIndices;
-        candidateIndices.reserve(simulateCount);
-        for (int i = 0; i < simulateCount && i < static_cast<int>(order.size()); ++i) {
-                int idx = order[i];
-                if (bannedMask[idx]) continue;
-                candidateIndices.push_back(idx);
-        }
-        if (candidateIndices.empty()) {
-                for (int idx : order) {
-                        if (bannedMask[idx]) continue;
-                        candidateIndices.push_back(idx);
-                        if (static_cast<int>(candidateIndices.size()) >= targetSim) break;
-                }
-        }
-
-        unordered_set<int> negSeedSet = info.negatives;
         unordered_set<int> workingSeeds;
         vector<char> workingMask(N, 0);
         if (info.hasGiven) {
@@ -244,6 +217,32 @@ static unordered_set<int> runSeedSelection(
                 int idx = cache.indexOf(info.given);
                 if (idx >= 0) workingMask[idx] = 1;
         }
+
+        const int MIN_SIM = 200;
+        const int MULTIPLIER = 40;
+        int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
+        int simulateCount = min(static_cast<int>(N), targetSim);
+
+        vector<int> candidateIndices;
+        candidateIndices.reserve(simulateCount);
+        for (int i = 0; i < simulateCount && i < static_cast<int>(order.size()); ++i) {
+                int idx = order[i];
+                if (bannedMask[idx] || workingMask[idx]) continue;
+                if (cache.outAdj[idx].empty()) continue;
+                if (cache.outStrength[idx] < 1e-6) continue;
+                candidateIndices.push_back(idx);
+        }
+        if (candidateIndices.empty()) {
+                for (int idx : order) {
+                        if (bannedMask[idx] || workingMask[idx]) continue;
+                        if (cache.outAdj[idx].empty()) continue;
+                        if (cache.outStrength[idx] < 1e-6) continue;
+                        candidateIndices.push_back(idx);
+                        if (static_cast<int>(candidateIndices.size()) >= targetSim) break;
+                }
+        }
+
+        unordered_set<int> negSeedSet = info.negatives;
         FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
         double currentSpread = baseResult.spread;
         int iteration = 0;
@@ -262,8 +261,14 @@ static unordered_set<int> runSeedSelection(
                 }
         };
 
+        unordered_set<int> trialSeeds;
         auto evaluateCandidate = [&](int nodeId, int nodeIdx, int iterationTag) {
-                unordered_set<int> trialSeeds = workingSeeds;
+                trialSeeds.clear();
+                size_t requiredSize = workingSeeds.size() + 1;
+                if (trialSeeds.bucket_count() < requiredSize * 2) {
+                        trialSeeds.reserve(requiredSize * 2);
+                }
+                trialSeeds.insert(workingSeeds.begin(), workingSeeds.end());
                 trialSeeds.insert(nodeId);
                 FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
                 return CelfEntry{ nodeId, nodeIdx, result.spread - currentSpread, result.spread, iterationTag };
@@ -271,7 +276,7 @@ static unordered_set<int> runSeedSelection(
 
         priority_queue<CelfEntry, vector<CelfEntry>, CelfCompare> pq;
         for (int nodeIdx : candidateIndices) {
-                if (workingMask[nodeIdx]) continue;
+                if (workingMask[nodeIdx] || bannedMask[nodeIdx]) continue;
                 int nodeId = cache.nodeIds[nodeIdx];
                 pq.push(evaluateCandidate(nodeId, nodeIdx, 0));
         }
@@ -280,7 +285,6 @@ static unordered_set<int> runSeedSelection(
                 CelfEntry top = pq.top();
                 pq.pop();
                 if (top.nodeIdx < 0 || top.nodeIdx >= static_cast<int>(N)) continue;
-                if (workingMask[top.nodeIdx] || bannedMask[top.nodeIdx]) continue;
                 if (top.lastUpdate == iteration) {
                         seeds.insert(top.nodeId);
                         workingSeeds.insert(top.nodeId);
@@ -289,6 +293,7 @@ static unordered_set<int> runSeedSelection(
                         ++iteration;
                 }
                 else {
+                        if (workingMask[top.nodeIdx] || bannedMask[top.nodeIdx]) continue;
                         pq.push(evaluateCandidate(top.nodeId, top.nodeIdx, iteration));
                 }
         }
