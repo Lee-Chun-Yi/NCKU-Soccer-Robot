@@ -18,9 +18,9 @@ using namespace std;
  * 用於 priority_queue，儲存節點的潛在邊際增益。
  */
 struct NodeGain {
-	double score;    // 邊際增益分數
-	int node_id;  // 節點 ID
-	int round;    // 標記這個分數是在第幾輪 (k) 計算的
+        double score;    // 邊際增益分數
+        int node_id;  // 節點 ID
+        int round;    // 標記這個分數是在第幾輪 (k) 計算的
 
 	/**
 	 * @brief 重載 < 運算子
@@ -30,6 +30,11 @@ struct NodeGain {
 	bool operator<(const NodeGain& other) const {
 		return score < other.score;
 	}
+};
+
+struct StaticScore {
+        double score;
+        int node;
 };
 
 
@@ -69,27 +74,43 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 	//  - 正向門檻 pos_th
 	//  - 負向門檻絕對值 neg_th_mag
 	//  - 入邊正向影響總和 in_strength
-	vector<double> pos_th(N, 0.0);
-	vector<double> neg_th_mag(N, 0.0);
-	vector<double> in_strength(N, 0.0);
+        vector<double> pos_th(N, 0.0);
+        vector<double> neg_th_mag(N, 0.0);
+        vector<double> in_strength(N, 0.0);
+        vector<double> pos_out_sum(N, 0.0);
+        vector<double> neg_out_sum(N, 0.0);
 
-	for (size_t i = 0; i < N; ++i) {
-		int u = nodes[i];
-		double pth = G.getNodeThreshold(u);  // 正門檻
-		double nth = G.getNodeThreshold2(u); // 負門檻（通常為負值）
+        for (size_t i = 0; i < N; ++i) {
+                int u = nodes[i];
+                double pth = G.getNodeThreshold(u);  // 正門檻
+                double nth = G.getNodeThreshold2(u); // 負門檻（通常為負值）
 
-		pos_th[i] = std::max(EPS, pth);
-		neg_th_mag[i] = std::max(EPS, std::fabs(nth));
+                pos_th[i] = std::max(EPS, pth);
+                neg_th_mag[i] = std::max(EPS, std::fabs(nth));
 
-		double sum_in = 0.0;
-		// 只累計正向入邊影響力（代表這個點本來就很容易被啟動）
-		vector<int> innei = G.getNodeInNeighbors(u);
-		for (int p : innei) {
-			double w = G.getEdgeInfluence(p, u);
-			if (w > 0.0) sum_in += w;
-		}
-		in_strength[i] = sum_in;
-	}
+                double sum_in = 0.0;
+                // 只累計正向入邊影響力（代表這個點本來就很容易被啟動）
+                vector<int> innei = G.getNodeInNeighbors(u);
+                for (int p : innei) {
+                        double w = G.getEdgeInfluence(p, u);
+                        if (w > 0.0) sum_in += w;
+                }
+                in_strength[i] = sum_in;
+        }
+
+        for (size_t i = 0; i < N; ++i) {
+                int u = nodes[i];
+                vector<int> outnei = G.getNodeOutNeighbors(u);
+                for (int v : outnei) {
+                        double w = G.getEdgeInfluence(u, v);
+                        if (w > 0.0) {
+                                pos_out_sum[i] += w;
+                        }
+                        else if (w < 0.0) {
+                                neg_out_sum[i] += std::fabs(w);
+                        }
+                }
+        }
 
 	// 覆蓋率：
 	//  pos_coverage[v] ∈ ：目前已選種子對 v 的正向門檻覆蓋比例
@@ -98,11 +119,11 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 	vector<double> neg_coverage(N, 0.0);
 
 	// (A) 啟發式權重微調
-	const double LAMBDA = 1.35;   // 正向覆蓋增益
-	const double PHI = 0.65;   // 負向覆蓋懲罰
-	const double GAMMA = 0.18;  // 節點自身正門檻懲罰
-	const double DELTA = 0.12;   // 入邊正向強度懲罰（避免冗餘種子）
-	const double ETA = 0.32;  // 獎勵「不易變負」的強韌性 (從 0.0 調整)
+        const double LAMBDA = 1.2;   // 正向覆蓋增益
+        const double PHI = 2.0;   // 負向覆蓋懲罰
+        const double GAMMA = 0.10;  // 節點自身正門檻懲罰
+        const double DELTA = 0.10;   // 入邊正向強度懲罰（避免冗餘種子）
+        const double ETA = 0.40;  // 獎勵「不易變負」的強韌性 (從 0.0 調整)
 
 	auto is_forbidden = [&](int node) -> bool {
 		if (node == givenPosSeed) return true;
@@ -113,26 +134,38 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 	/**
 	 * @brief [Lambda] 計算節點 u 的邊際增益分數
 	 */
-	auto marginal_gain = [&](int u) -> double {
-		// 已經是種子就不再選
-		if (seeds.count(u) || is_forbidden(u)) {
-			return -std::numeric_limits<double>::infinity();
-		}
+        auto marginal_gain = [&](int u) -> double {
+                // 已經是種子就不再選
+                if (seeds.count(u) || is_forbidden(u)) {
+                        return -std::numeric_limits<double>::infinity();
+                }
 
-		auto it_u = id2idx.find(u);
-		if (it_u == id2idx.end()) return -std::numeric_limits<double>::infinity();
-		size_t iu = it_u->second;
+                auto it_u = id2idx.find(u);
+                if (it_u == id2idx.end()) return -std::numeric_limits<double>::infinity();
+                size_t iu = it_u->second;
 
-		// 基本分數：自己的門檻越高 / 入邊越強，分數越低
-		double score = 0.0;
-		score -= GAMMA * pos_th[iu];
-		score -= DELTA * in_strength[iu];
-		score += ETA * neg_th_mag[iu]; // (A) 獎勵強韌性
+                double pos_out = pos_out_sum[iu];
+                double neg_out = neg_out_sum[iu];
+                double total_out = pos_out + neg_out;
+                if (total_out > 0.0 && neg_out > 0.6 * total_out) {
+                        return -std::numeric_limits<double>::infinity();
+                }
 
-		// 貢獻：正向出邊對鄰居的新增覆蓋
-		// 懲罰：負向出邊對鄰居的負向覆蓋
-		vector<int> outnei = G.getNodeOutNeighbors(u);
-		for (int v : outnei) {
+                // 基本分數：自己的門檻越高 / 入邊越強，分數越低
+                double score = 0.0;
+                score -= GAMMA * pos_th[iu];
+                score -= DELTA * in_strength[iu];
+                score += ETA * neg_th_mag[iu]; // (A) 獎勵強韌性
+
+                if (total_out > 0.0) {
+                        double safe_ratio = pos_out / total_out;
+                        score += 0.05 * safe_ratio;
+                }
+
+                // 貢獻：正向出邊對鄰居的新增覆蓋
+                // 懲罰：負向出邊對鄰居的負向覆蓋
+                vector<int> outnei = G.getNodeOutNeighbors(u);
+                for (int v : outnei) {
 			auto it_v = id2idx.find(v);
 			if (it_v == id2idx.end()) continue;
 			size_t j = it_v->second;
@@ -142,16 +175,17 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 			if (w > EPS) {
 				// 正向邊：增加對 v 的正向覆蓋（以門檻做正規化）
 				double need = std::max(0.0, 1.0 - pos_coverage[j]);
-				if (need > 0.0) {
-					double add = w / pos_th[j];      // 這條邊若單獨作種子可覆蓋的比例
-					double eff = std::min(need, add); // 但不能超過尚未覆蓋的部分
-					score += LAMBDA * eff;
-				}
-			}
-			else if (w < -EPS) {
-				// 負向邊：這個候選種子若被選中，會對 v 增加變負的風險
-				double need_neg = std::max(0.0, 1.0 - neg_coverage[j]);
-				if (need_neg > 0.0) {
+                                if (need > 0.0) {
+                                        double add = w / pos_th[j];      // 這條邊若單獨作種子可覆蓋的比例
+                                        double eff = std::min(need, add); // 但不能超過尚未覆蓋的部分
+                                        score += LAMBDA * eff;
+                                }
+                                score += 0.05 * in_strength[j];
+                        }
+                        else if (w < -EPS) {
+                                // 負向邊：這個候選種子若被選中，會對 v 增加變負的風險
+                                double need_neg = std::max(0.0, 1.0 - neg_coverage[j]);
+                                if (need_neg > 0.0) {
 					double add_neg = std::fabs(w) / neg_th_mag[j];
 					double eff_neg = std::min(need_neg, add_neg);
 					score -= PHI * eff_neg;
@@ -193,20 +227,40 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 	};
 
 
-	if (id2idx.find(givenPosSeed) != id2idx.end()) {
-		apply_influence(givenPosSeed);
-	}
-	// --- (B) CELF 最佳化演算法 [1, 2, 3, 5] ---
+        if (id2idx.find(givenPosSeed) != id2idx.end()) {
+                apply_influence(givenPosSeed);
+        }
 
-	// CELF 步驟 1: 初始計算 (k=0)
-	// 建立一個最大堆 (Max-Heap) [6, 7]
-	std::priority_queue<NodeGain> pq;
-	// O(N * avg_degree)，計算所有節點的初始增益
-	for (int u : nodes) {
-		double sc = marginal_gain(u); // 此時 S 為空
-		// C++14 修正：必須明確使用類型建構 NodeGain
-		pq.push(NodeGain{ sc, u, 0 }); // 標記為第 0 輪計算
-	}
+        vector<StaticScore> candidateScores;
+        candidateScores.reserve(N);
+        for (size_t i = 0; i < N; ++i) {
+                double static_score = pos_out_sum[i] - 2.0 * neg_out_sum[i];
+                candidateScores.push_back(StaticScore{ static_score, nodes[i] });
+        }
+
+        size_t desired = std::max(static_cast<size_t>(10ull * numberOfSeeds), static_cast<size_t>(2000));
+        size_t M = std::min(N, desired);
+        if (candidateScores.size() > M) {
+                auto nth = candidateScores.begin() + M;
+                std::nth_element(candidateScores.begin(), nth, candidateScores.end(),
+                        [](const StaticScore& a, const StaticScore& b) {
+                                return a.score > b.score;
+                        });
+                candidateScores.resize(M);
+        }
+
+        // --- (B) CELF 最佳化演算法 [1, 2, 3, 5] ---
+
+        // CELF 步驟 1: 初始計算 (k=0)
+        // 建立一個最大堆 (Max-Heap) [6, 7]
+        std::priority_queue<NodeGain> pq;
+        // O(N * avg_degree)，計算所有節點的初始增益
+        for (const auto& cand : candidateScores) {
+                int u = cand.node;
+                double sc = marginal_gain(u); // 此時 S 為空
+                // C++14 修正：必須明確使用類型建構 NodeGain
+                pq.push(NodeGain{ sc, u, 0 }); // 標記為第 0 輪計算
+        }
 
 	// CELF 步驟 2: 貪婪選出 K 個種子
 	for (unsigned int k = 0; k < numberOfSeeds && !pq.empty(); ++k) {
