@@ -91,64 +91,16 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 		in_strength[i] = sum_in;
 	}
 
-        // 覆蓋率：
-        //  pos_coverage[v] ∈ ：目前已選種子對 v 的正向門檻覆蓋比例
-        //  neg_coverage[v] ∈ ：目前已選種子對 v 的負向門檻覆蓋比例
-        vector<double> pos_coverage(N, 0.0);
-        vector<double> neg_coverage(N, 0.0);
+	// 覆蓋率：
+	//  pos_coverage[v] ∈ ：目前已選種子對 v 的正向門檻覆蓋比例
+	//  neg_coverage[v] ∈ ：目前已選種子對 v 的負向門檻覆蓋比例
+	vector<double> pos_coverage(N, 0.0);
+	vector<double> neg_coverage(N, 0.0);
 
-        // =====================================================
-        // === Improvement A: Negative Seed Influence Penalty ===
-        // =====================================================
-        vector<double> neg_proximity(N, 0.0);
-        vector<int> visit_token(N, -1);
-        int current_token = 0;
-        for (int negSeed : givenNegSeeds) {
-                auto it_seed = id2idx.find(negSeed);
-                if (it_seed == id2idx.end()) continue;
-
-                ++current_token;
-                std::queue<std::pair<int, int>> q;
-                q.push({ negSeed, 0 });
-                visit_token[it_seed->second] = current_token;
-
-                while (!q.empty()) {
-                        auto cur = q.front();
-                        q.pop();
-
-                        int node = cur.first;
-                        int depth = cur.second;
-                        if (depth >= 2) continue;
-
-                        vector<int> outnei = G.getNodeOutNeighbors(node);
-                        for (int v : outnei) {
-                                auto it_v = id2idx.find(v);
-                                if (it_v == id2idx.end()) continue;
-
-                                size_t idx_v = it_v->second;
-                                if (visit_token[idx_v] == current_token) continue;
-
-                                int next_depth = depth + 1;
-                                visit_token[idx_v] = current_token;
-
-                                if (next_depth == 1) {
-                                        neg_proximity[idx_v] = std::max(neg_proximity[idx_v], 1.0);
-                                }
-                                else if (next_depth == 2) {
-                                        neg_proximity[idx_v] = std::max(neg_proximity[idx_v], 0.5);
-                                }
-
-                                if (next_depth < 2) {
-                                        q.push({ v, next_depth });
-                                }
-                        }
-                }
-        }
-
-        // (A) 啟發式權重微調
-        const double LAMBDA = 1.0;   // 正向覆蓋增益
-        const double PHI = 1.0;   // 負向覆蓋懲罰
-        const double GAMMA = 0.25;  // 節點自身正門檻懲罰
+	// (A) 啟發式權重微調
+	const double LAMBDA = 1.0;   // 正向覆蓋增益
+	const double PHI = 1.0;   // 負向覆蓋懲罰
+	const double GAMMA = 0.25;  // 節點自身正門檻懲罰
 	const double DELTA = 0.2;   // 入邊正向強度懲罰（避免冗餘種子）
 	const double ETA = 0.15;  // 獎勵「不易變負」的強韌性 (從 0.0 調整)
 
@@ -171,21 +123,15 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 		if (it_u == id2idx.end()) return -std::numeric_limits<double>::infinity();
 		size_t iu = it_u->second;
 
-                // 基本分數：自己的門檻越高 / 入邊越強，分數越低
-                double score = 0.0;
-                score -= GAMMA * pos_th[iu];
-                score -= DELTA * in_strength[iu];
-                score += ETA * neg_th_mag[iu]; // (A) 獎勵強韌性
+		// 基本分數：自己的門檻越高 / 入邊越強，分數越低
+		double score = 0.0;
+		score -= GAMMA * pos_th[iu];
+		score -= DELTA * in_strength[iu];
+		score += ETA * neg_th_mag[iu]; // (A) 獎勵強韌性
 
-                // =====================================================
-                // === Improvement A: Negative Seed Influence Penalty ===
-                // =====================================================
-                const double NEG_ZONE_PENALTY = 0.8;
-                score -= NEG_ZONE_PENALTY * neg_proximity[iu];
-
-                // 貢獻：正向出邊對鄰居的新增覆蓋
-                // 懲罰：負向出邊對鄰居的負向覆蓋
-                vector<int> outnei = G.getNodeOutNeighbors(u);
+		// 貢獻：正向出邊對鄰居的新增覆蓋
+		// 懲罰：負向出邊對鄰居的負向覆蓋
+		vector<int> outnei = G.getNodeOutNeighbors(u);
 		for (int v : outnei) {
 			auto it_v = id2idx.find(v);
 			if (it_v == id2idx.end()) continue;
