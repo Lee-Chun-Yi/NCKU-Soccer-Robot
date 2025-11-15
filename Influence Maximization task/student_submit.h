@@ -3,217 +3,296 @@
 
 #include "LT.h"
 #include "graph.h"
-#include <unordered_set>
-#include <vector>
-#include <unordered_map>
 #include <algorithm>
-#include <cmath>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <queue>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
 using namespace std;
 
-struct NodeGain {
-	double score;
-	int    node_id;
-	int    round;
+namespace student_algo_detail {
 
-	bool operator<(const NodeGain& other) const {
-		return score < other.score;   // max-heap
+struct SeedInfo {
+	bool loaded = false;
+	bool hasGiven = false;
+	int given = -1;
+	string dataDir;
+	unordered_set<int> negatives;
+};
+
+static string joinPath(const string& dir, const string& file) {
+	if (dir.empty()) return file;
+	char tail = dir.back();
+	if (tail == '/' || tail == '\\') return dir + file;
+	return dir + "/" + file;
+}
+
+static vector<string> readCmdlineArgs() {
+	ifstream cmd("/proc/self/cmdline", ios::binary);
+	if (!cmd.is_open()) return {};
+	string raw((istreambuf_iterator<char>(cmd)), istreambuf_iterator<char>());
+	vector<string> args;
+	string current;
+	for (char c : raw) {
+		if (c == '\0') {
+			if (!current.empty()) {
+				args.push_back(current);
+				current.clear();
+			}
+		}
+		else {
+			current.push_back(c);
+		}
+	}
+	if (!current.empty()) args.push_back(current);
+	return args;
+}
+
+static const SeedInfo& getSeedInfo() {
+	static SeedInfo info;
+	if (info.loaded) return info;
+	info.loaded = true;
+
+	vector<string> args = readCmdlineArgs();
+	if (args.size() >= 2) info.dataDir = args[1];
+	if (info.dataDir.empty()) return info;
+
+	ifstream gp(joinPath(info.dataDir, "given_pos.txt"));
+	if (gp.is_open() && (gp >> info.given)) {
+		info.hasGiven = true;
+	}
+
+	ifstream gn(joinPath(info.dataDir, "neg_seed.txt"));
+	if (gn.is_open()) {
+		int val = 0;
+		while (gn >> val) info.negatives.insert(val);
+	}
+
+	return info;
+}
+
+struct GraphCache {
+	vector<int> nodeIds;
+	unordered_map<int, int> idToIndex;
+	vector<vector<pair<int, double>>> outAdj;
+	vector<double> posThreshold;
+	vector<double> negThreshold;
+	vector<double> outStrength;
+
+	int indexOf(int nodeId) const {
+		auto it = idToIndex.find(nodeId);
+		if (it == idToIndex.end()) return -1;
+		return it->second;
 	}
 };
 
-unordered_set<int> seedSelection(DirectedGraph& G,
-	unsigned int numberOfSeeds,
-	int givenPosSeed,
-	const unordered_set<int>& givenNegSeeds)
+static GraphCache buildGraphCache(DirectedGraph& G) {
+	GraphCache cache;
+	cache.nodeIds = G.getAllNodes();
+	sort(cache.nodeIds.begin(), cache.nodeIds.end());
+
+	cache.idToIndex.reserve(cache.nodeIds.size() * 2 + 1);
+	for (size_t i = 0; i < cache.nodeIds.size(); ++i) {
+		cache.idToIndex[cache.nodeIds[i]] = static_cast<int>(i);
+	}
+
+	size_t N = cache.nodeIds.size();
+	cache.outAdj.assign(N, {});
+	cache.posThreshold.assign(N, 0.0);
+	cache.negThreshold.assign(N, 0.0);
+	cache.outStrength.assign(N, 0.0);
+
+	for (size_t i = 0; i < N; ++i) {
+		int nodeId = cache.nodeIds[i];
+		cache.posThreshold[i] = G.getNodeThreshold(nodeId);
+		cache.negThreshold[i] = G.getNodeThreshold2(nodeId);
+
+		vector<int> outs = G.getNodeOutNeighbors(nodeId);
+		auto& adj = cache.outAdj[i];
+		adj.reserve(outs.size());
+
+		double total = 0.0;
+		for (int nb : outs) {
+			double w = G.getEdgeInfluence(nodeId, nb);
+			total += w;
+			auto it = cache.idToIndex.find(nb);
+			if (it == cache.idToIndex.end()) continue;
+			adj.emplace_back(it->second, w);
+		}
+
+		sort(adj.begin(), adj.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
+			if (a.first != b.first) return a.first < b.first;
+			return a.second < b.second;
+		});
+
+		cache.outStrength[i] = total;
+	}
+
+	return cache;
+}
+
+static vector<double> computeNegExposure(const GraphCache& cache, const unordered_set<int>& negSeeds) {
+	vector<double> exposure(cache.nodeIds.size(), 0.0);
+	if (cache.nodeIds.empty() || negSeeds.empty()) return exposure;
+	for (int id : negSeeds) {
+		int idx = cache.indexOf(id);
+		if (idx < 0) continue;
+		for (const auto& edge : cache.outAdj[idx])
+			exposure[edge.first] += edge.second;
+	}
+	return exposure;
+}
+
+struct FullDiffResult {
+	size_t posActive = 0;
+	size_t negActive = 0;
+	double spread = 0.0;
+};
+
+static FullDiffResult runFullDiffusionSimulation(
+	DirectedGraph& G,
+	const unordered_set<int>& posSeeds,
+	const unordered_set<int>& negSeeds)
 {
+	FullDiffResult result;
+	unordered_set<int> finalPos, finalNeg;
+	diffuse_signed_all(&G, posSeeds, negSeeds, finalPos, finalNeg);
+	result.posActive = finalPos.size();
+	result.negActive = finalNeg.size();
+	result.spread = double(result.posActive) - double(result.negActive);
+	return result;
+}
+
+} // namespace student_algo_detail
+
+/*
+ * seedSelection:
+ *   - G:   ��i��
+ *   - numberOfSeeds: �ݭn�A�諸�u�B�~���V�ؤl�ƶq�v
+ *                     �]�t�Υt�~�|�A�[�W 1 �� given_pos.txt �̪� positive seed�^
+ *
+ * �A�u�ݭn�^�Ǥ@�� unordered_set<int>�A�̭��� numberOfSeeds 9��positivate seed�s���C
+ */
+unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
+	using namespace student_algo_detail;
+
 	unordered_set<int> seeds;
-	if (numberOfSeeds == 0) return seeds;
-
-	vector<int> nodes = G.getAllNodes();
-	if (nodes.empty()) return seeds;
-
-	const size_t N = nodes.size();
-	const double EPS = 1e-12;
-
-	// id -> index
-	unordered_map<int, size_t> id2idx;
-	id2idx.reserve(N * 2);
-	for (size_t i = 0; i < N; ++i) {
-		id2idx[nodes[i]] = i;
+	if (numberOfSeeds == 0 || G.getSize() == 0) {
+		return seeds;
 	}
 
-	// thresholds, in-strength, neg-out-strength
-	vector<double> pos_th(N, 0.0);
-	vector<double> neg_th_mag(N, 0.0);
-	vector<double> in_strength(N, 0.0);
-	vector<double> neg_out_strength(N, 0.0);
+	const GraphCache cache = buildGraphCache(G);
+	const SeedInfo& info = getSeedInfo();
 
-	for (size_t i = 0; i < N; ++i) {
-		int u = nodes[i];
+	unordered_set<int> banned = info.negatives;
+	if (info.hasGiven) banned.insert(info.given);
 
-		double pth = G.getNodeThreshold(u);   // positive threshold
-		double nth = G.getNodeThreshold2(u);  // negative threshold (usually negative)
+	vector<double> negExposure = computeNegExposure(cache, info.negatives);
 
-		pos_th[i] = std::max(EPS, pth);
-		neg_th_mag[i] = std::max(EPS, std::fabs(nth));
-
-		// in-strength (positive only)
-		vector<int> innei = G.getNodeInNeighbors(u);
-		double sum_in = 0.0;
-		for (int p : innei) {
-			double w = G.getEdgeInfluence(p, u);
-			if (w > 0.0) sum_in += w;
-		}
-		in_strength[i] = sum_in;
-
-		// neg_out_strength (how much negative u can spread out)
-		vector<int> outnei = G.getNodeOutNeighbors(u);
-		double sum_neg_out = 0.0;
-		for (int v : outnei) {
-			double w = G.getEdgeInfluence(u, v);
-			if (w < 0.0) sum_neg_out += std::fabs(w);
-		}
-		neg_out_strength[i] = sum_neg_out;
+	const size_t N = cache.nodeIds.size();
+	vector<double> fastScore(N, 0.0);
+	for (size_t idx = 0; idx < N; ++idx) {
+		double score = cache.outStrength[idx];
+		score += 0.05 * double(cache.outAdj[idx].size());
+		score -= 0.55 * cache.posThreshold[idx];
+		if (!negExposure.empty()) score -= 0.8 * negExposure[idx];
+		fastScore[idx] = score;
 	}
 
-	// coverage
-	vector<double> pos_coverage(N, 0.0);
-	vector<double> neg_coverage(N, 0.0);
+	vector<int> order;
+	order.reserve(N);
+	for (size_t i = 0; i < N; ++i) order.push_back(static_cast<int>(i));
+	sort(order.begin(), order.end(), [&](int a, int b) {
+		if (fastScore[a] != fastScore[b]) return fastScore[a] > fastScore[b];
+		return cache.nodeIds[a] < cache.nodeIds[b];
+	});
 
-	// heuristic parameters (slightly rebalanced)
-	const double LAMBDA = 1.30;  // positive gain
-	const double PHI = 1.00;  // negative penalty (比你原本高一點)
-	const double GAMMA = 0.18;  // self positive threshold penalty
-	const double DELTA = 0.12;  // in-strength penalty
-	const double ETA = 0.40;  // reward for large negative threshold (strong against negative)
-	const double RISK = 0.25;  // new: penalty for neg_out_strength
+	const int MIN_SIM = 400;
+	const int MULTIPLIER = 60;
+	int simulateCount = static_cast<int>(order.size());
+	int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
+	if (simulateCount > targetSim) simulateCount = targetSim;
 
-	auto is_forbidden = [&](int node) -> bool {
-		if (node == givenPosSeed) return true;
-		return givenNegSeeds.find(node) != givenNegSeeds.end();
+	vector<int> candidateNodes;
+	candidateNodes.reserve(simulateCount);
+	for (int i = 0; i < simulateCount && i < static_cast<int>(order.size()); ++i) {
+		int idx = order[i];
+		int nodeId = cache.nodeIds[idx];
+		if (banned.count(nodeId)) continue;
+		candidateNodes.push_back(nodeId);
+	}
+	if (candidateNodes.empty()) {
+		for (int nodeId : cache.nodeIds) {
+			if (banned.count(nodeId)) continue;
+			candidateNodes.push_back(nodeId);
+			if (static_cast<int>(candidateNodes.size()) >= targetSim) break;
+		}
+	}
+
+	unordered_set<int> negSeedSet = info.negatives;
+	unordered_set<int> workingSeeds;
+	if (info.hasGiven) workingSeeds.insert(info.given);
+	FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
+	double currentSpread = baseResult.spread;
+	int iteration = 0;
+
+	struct CelfEntry {
+		int nodeId;
+		double gain;
+		double totalSpread;
+		int lastUpdate;
 	};
-
-	// marginal gain
-	auto marginal_gain = [&](int u) -> double {
-		if (seeds.count(u) || is_forbidden(u)) {
-			return -std::numeric_limits<double>::infinity();
-		}
-
-		auto it_u = id2idx.find(u);
-		if (it_u == id2idx.end()) {
-			return -std::numeric_limits<double>::infinity();
-		}
-		size_t iu = it_u->second;
-
-		double score = 0.0;
-
-		// node-level terms
-		score -= GAMMA * pos_th[iu];
-		score -= DELTA * in_strength[iu];
-		score += ETA * neg_th_mag[iu];
-		score -= RISK * neg_out_strength[iu];   // new: avoid nodes that can spread lots of negative
-
-		// 1-hop contribution
-		vector<int> outnei = G.getNodeOutNeighbors(u);
-		for (int v : outnei) {
-			auto it_v = id2idx.find(v);
-			if (it_v == id2idx.end()) continue;
-			size_t j = it_v->second;
-
-			double w = G.getEdgeInfluence(u, v);
-
-			if (w > EPS) {
-				double need = std::max(0.0, 1.0 - pos_coverage[j]);
-				if (need > 0.0) {
-					double add = w / pos_th[j];
-					double eff = std::min(need, add);
-					score += LAMBDA * eff;
-				}
-			}
-			else if (w < -EPS) {
-				double need_neg = std::max(0.0, 1.0 - neg_coverage[j]);
-				if (need_neg > 0.0) {
-					double add_neg = std::fabs(w) / neg_th_mag[j];
-					double eff_neg = std::min(need_neg, add_neg);
-					score -= PHI * eff_neg;
-				}
-			}
-		}
-
-		return score;
-	};
-
-	// apply influence
-	auto apply_influence = [&](int u) {
-		auto it_u = id2idx.find(u);
-		if (it_u == id2idx.end()) return;
-
-		vector<int> outnei = G.getNodeOutNeighbors(u);
-		for (int v : outnei) {
-			auto it_v = id2idx.find(v);
-			if (it_v == id2idx.end()) continue;
-			size_t j = it_v->second;
-
-			double w = G.getEdgeInfluence(u, v);
-
-			if (w > EPS) {
-				double add = w / pos_th[j];
-				if (add > 0.0) {
-					pos_coverage[j] = std::min(1.0, pos_coverage[j] + add);
-				}
-			}
-			else if (w < -EPS) {
-				double add_neg = std::fabs(w) / neg_th_mag[j];
-				if (add_neg > 0.0) {
-					neg_coverage[j] = std::min(1.0, neg_coverage[j] + add_neg);
-				}
-			}
+	struct CelfCompare {
+		bool operator()(const CelfEntry& a, const CelfEntry& b) const {
+			if (a.gain != b.gain) return a.gain < b.gain;
+			return a.nodeId > b.nodeId;
 		}
 	};
 
-	// apply given positive seed once
-	if (id2idx.find(givenPosSeed) != id2idx.end()) {
-		apply_influence(givenPosSeed);
+	auto evaluateCandidate = [&](int nodeId, int iterationTag) {
+		unordered_set<int> trialSeeds = workingSeeds;
+		trialSeeds.insert(nodeId);
+		FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
+		return CelfEntry{ nodeId, result.spread - currentSpread, result.spread, iterationTag };
+	};
+
+	priority_queue<CelfEntry, vector<CelfEntry>, CelfCompare> pq;
+	for (int nodeId : candidateNodes) {
+		if (workingSeeds.count(nodeId)) continue;
+		pq.push(evaluateCandidate(nodeId, 0));
 	}
 
-	// CELF
-	priority_queue<NodeGain> pq;
-
-	// k=0 initial gains
-	for (int u : nodes) {
-		double sc = marginal_gain(u);
-		pq.push(NodeGain{ sc, u, 0 });
-	}
-
-	for (unsigned int k = 0; k < numberOfSeeds && !pq.empty(); ++k) {
-		int bestNode = -1;
-
-		while (true) {
-			if (pq.empty()) break;
-
-			NodeGain top = pq.top();
-			pq.pop();
-
-			if (top.round < (int)k) {
-				double new_score = marginal_gain(top.node_id);
-				pq.push(NodeGain{ new_score, top.node_id, (int)k });
-				continue;
-			}
-			else {
-				bestNode = top.node_id;
-				break;
-			}
+	while (seeds.size() < numberOfSeeds && !pq.empty()) {
+		CelfEntry top = pq.top();
+		pq.pop();
+		if (workingSeeds.count(top.nodeId) || banned.count(top.nodeId)) continue;
+		if (top.lastUpdate == iteration) {
+			seeds.insert(top.nodeId);
+			workingSeeds.insert(top.nodeId);
+			currentSpread = top.totalSpread;
+			++iteration;
 		}
+		else {
+			pq.push(evaluateCandidate(top.nodeId, iteration));
+		}
+	}
 
-		if (bestNode == -1 || is_forbidden(bestNode)) break;
-
-		seeds.insert(bestNode);
-		apply_influence(bestNode);
+	if (seeds.size() < numberOfSeeds) {
+		for (int idx : order) {
+			if (seeds.size() >= numberOfSeeds) break;
+			int nodeId = cache.nodeIds[idx];
+			if (banned.count(nodeId) || seeds.count(nodeId)) continue;
+			seeds.insert(nodeId);
+		}
 	}
 
 	return seeds;
 }
 
-#endif // YOUR_ALGORITHM_H
+#endif
