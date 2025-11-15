@@ -188,15 +188,15 @@ static double computeNodeScore(DirectedGraph& G, int nodeId) {
     const double negRisk = gScoreContext.negInRisk[idx];
     const double adjPenalty = gScoreContext.negAdjPenalty[idx];
 
-    double score = 1.4 * pos + 0.5 * twoHop - 1.2 * negRisk - 0.8 * adjPenalty;
-    score += 0.25 / (1.0 + negRisk);
+    double score = 1.8 * pos + 1.0 * twoHop - 0.4 * negRisk - 0.2 * adjPenalty;
+    score += 0.15 / (1.0 + negRisk);
     return score;
 }
 
 struct CandidateEntry {
     int node = -1;
     double gain = numeric_limits<double>::lowest();
-    size_t last_update = static_cast<size_t>(-1);
+    size_t last_update = numeric_limits<size_t>::max();
     SpreadStats stats;
 };
 
@@ -207,7 +207,8 @@ struct CandidateComparator {
     }
 };
 
-static constexpr int SIMULATION_LIMIT = 300;
+static constexpr int SIMULATION_LIMIT = 8000;
+static constexpr int MAX_PROPAGATION_ROUNDS = 32;
 static int gSimulationCount = 0;
 
 static void resetSimulationBudget() { gSimulationCount = 0; }
@@ -219,52 +220,51 @@ static SpreadStats simulateSpread(
         const unordered_set<int>& selected,
         int extraNode) {
     if (gSimulationCount >= SIMULATION_LIMIT) {
-        return SpreadStats{0, 60};
+        return SpreadStats{0, 0};
     }
     ++gSimulationCount;
 
-    static unordered_set<int> posSeeds;
-    static unordered_set<int> negSeeds;
+    static unordered_set<int> posActive;
+    static unordered_set<int> negActive;
 
-    posSeeds.clear();
-    posSeeds.insert(basePos.begin(), basePos.end());
-    posSeeds.insert(selected.begin(), selected.end());
-    if (extraNode >= 0) posSeeds.insert(extraNode);
+    posActive.clear();
+    posActive.insert(basePos.begin(), basePos.end());
+    posActive.insert(selected.begin(), selected.end());
+    if (extraNode >= 0) posActive.insert(extraNode);
 
-    negSeeds.clear();
-    negSeeds.insert(baseNeg.begin(), baseNeg.end());
-
-    unordered_set<int> posActive = posSeeds;
-    unordered_set<int> negActive = negSeeds;
+    negActive.clear();
+    negActive.insert(baseNeg.begin(), baseNeg.end());
 
     SpreadStats stats;
     stats.pos = static_cast<int>(posActive.size());
     stats.neg = static_cast<int>(negActive.size());
 
-    while (true) {
+    int rounds = 0;
+    while (rounds < MAX_PROPAGATION_ROUNDS) {
         auto result = diffuse_one_round_signed(&G, posActive, negActive);
         const auto& newPos = result.first;
         const auto& newNeg = result.second;
         if (newPos.empty() && newNeg.empty()) break;
         posActive.insert(newPos.begin(), newPos.end());
         negActive.insert(newNeg.begin(), newNeg.end());
-        stats.pos = static_cast<int>(posActive.size());
-        stats.neg = static_cast<int>(negActive.size());
-        if (stats.neg > stats.pos * 2 || stats.neg > 10) {
-            stats.pos = std::max(0, stats.pos - 5);
-            stats.neg += 25;
-            return stats;
-        }
-        if (stats.pos + stats.neg >= G.getSize() * 2) break;
+        ++rounds;
     }
 
+    stats.pos = static_cast<int>(posActive.size());
+    stats.neg = static_cast<int>(negActive.size());
+
     return stats;
+}
+
+static double evaluateStats(const SpreadStats& stats) {
+    return static_cast<double>(stats.pos) - 1.6 * static_cast<double>(stats.neg);
 }
 
 static void fillWithHeuristics(const vector<pair<int, double>>& ranking,
         const vector<int>& allNodes,
         const unordered_set<int>& forbidden,
         unordered_set<int>& selected,
+        vector<int>& selectedOrder,
         unsigned int numberOfSeeds) {
     const double riskLimit = 8.0;
     for (const auto& item : ranking) {
@@ -273,6 +273,7 @@ static void fillWithHeuristics(const vector<pair<int, double>>& ranking,
         if (selected.count(item.first)) continue;
         if (getNodeRisk(item.first) > riskLimit) continue;
         selected.insert(item.first);
+        selectedOrder.push_back(item.first);
     }
 
     if (selected.size() >= numberOfSeeds) return;
@@ -294,7 +295,7 @@ static void fillWithHeuristics(const vector<pair<int, double>>& ranking,
     });
     for (const auto& item : fallback) {
         if (selected.size() >= numberOfSeeds) break;
-        selected.insert(item.second);
+        if (selected.insert(item.second).second) selectedOrder.push_back(item.second);
     }
 
     if (selected.size() >= numberOfSeeds) return;
@@ -303,41 +304,215 @@ static void fillWithHeuristics(const vector<pair<int, double>>& ranking,
         if (selected.size() >= numberOfSeeds) break;
         if (forbidden.count(node)) continue;
         if (selected.count(node)) continue;
-        selected.insert(node);
+        if (selected.insert(node).second) selectedOrder.push_back(node);
     }
 }
 
-static void refineSelection(const vector<pair<int, double>>& ranking,
-        const unordered_set<int>& forbidden,
-        unsigned int numberOfSeeds,
-        unordered_set<int>& selected) {
-    if (selected.size() <= numberOfSeeds) {
-        if (selected.size() == numberOfSeeds) return;
-    }
-
-    vector<pair<double, int>> scored;
-    scored.reserve(selected.size());
-    DirectedGraph* graphPtr = gScoreContext.graph;
-    for (int node : selected) {
-        double sc = graphPtr ? computeNodeScore(*graphPtr, node) : 0.0;
-        scored.emplace_back(sc, node);
-    }
-    sort(scored.begin(), scored.end(), [](const auto& a, const auto& b) {
-        if (a.first != b.first) return a.first > b.first;
-        return a.second < b.second;
-    });
-
-    selected.clear();
-    for (const auto& item : scored) {
-        if (selected.size() >= numberOfSeeds) break;
-        selected.insert(item.second);
-    }
-
+static vector<int> collectTopCandidates(const vector<pair<int, double>>& ranking,
+        size_t limit,
+        const unordered_set<int>& forbidden) {
+    if (limit == 0) return {};
+    vector<int> result;
+    result.reserve(limit);
     for (const auto& item : ranking) {
-        if (selected.size() >= numberOfSeeds) break;
         if (forbidden.count(item.first)) continue;
-        selected.insert(item.first);
+        result.push_back(item.first);
+        if (result.size() >= limit) break;
     }
+    return result;
+}
+
+static void dropReplaceRefinement(DirectedGraph& G,
+        const unordered_set<int>& basePos,
+        const unordered_set<int>& baseNeg,
+        const unordered_set<int>& forbidden,
+        const vector<int>& candidateList,
+        vector<int>& seeds,
+        SpreadStats& bestStats,
+        int passes) {
+    if (seeds.empty() || candidateList.empty()) return;
+    unordered_set<int> seedSet(seeds.begin(), seeds.end());
+    double bestValue = evaluateStats(bestStats);
+    passes = max(passes, 1);
+    for (int pass = 0; pass < passes; ++pass) {
+        bool passImproved = false;
+        for (size_t i = 0; i < seeds.size(); ++i) {
+            if (gSimulationCount >= SIMULATION_LIMIT) return;
+            int original = seeds[i];
+            bool replaced = false;
+            seedSet.erase(original);
+            for (int candidate : candidateList) {
+                if (gSimulationCount >= SIMULATION_LIMIT) break;
+                if (seedSet.count(candidate)) continue;
+                if (forbidden.count(candidate)) continue;
+                seedSet.insert(candidate);
+                SpreadStats stats = simulateSpread(G, basePos, baseNeg, seedSet, -1);
+                double val = evaluateStats(stats);
+                if (val > bestValue + 1e-6) {
+                    seeds[i] = candidate;
+                    bestStats = stats;
+                    bestValue = val;
+                    replaced = true;
+                    passImproved = true;
+                    break;
+                }
+                seedSet.erase(candidate);
+            }
+            if (!replaced) {
+                seedSet.insert(original);
+            }
+        }
+        if (!passImproved) break;
+    }
+}
+
+static void pairwiseSwapRefinement(DirectedGraph& G,
+        const unordered_set<int>& basePos,
+        const unordered_set<int>& baseNeg,
+        const unordered_set<int>& forbidden,
+        const vector<int>& candidateList,
+        vector<int>& seeds,
+        SpreadStats& bestStats) {
+    if (seeds.size() < 2 || candidateList.empty()) return;
+    unordered_set<int> seedSet(seeds.begin(), seeds.end());
+    double bestValue = evaluateStats(bestStats);
+    for (size_t i = 0; i < seeds.size(); ++i) {
+        for (size_t j = i + 1; j < seeds.size(); ++j) {
+            if (gSimulationCount >= SIMULATION_LIMIT) return;
+            int first = seeds[i];
+            seedSet.erase(first);
+            bool replaced = false;
+            for (int candidate : candidateList) {
+                if (gSimulationCount >= SIMULATION_LIMIT) break;
+                if (seedSet.count(candidate)) continue;
+                if (forbidden.count(candidate)) continue;
+                seedSet.insert(candidate);
+                SpreadStats stats = simulateSpread(G, basePos, baseNeg, seedSet, -1);
+                double val = evaluateStats(stats);
+                if (val > bestValue + 1e-6) {
+                    seeds[i] = candidate;
+                    bestStats = stats;
+                    bestValue = val;
+                    replaced = true;
+                    break;
+                }
+                seedSet.erase(candidate);
+            }
+            if (!replaced) {
+                seedSet.insert(first);
+            }
+
+            if (gSimulationCount >= SIMULATION_LIMIT) return;
+            int second = seeds[j];
+            seedSet.erase(second);
+            replaced = false;
+            for (int candidate : candidateList) {
+                if (gSimulationCount >= SIMULATION_LIMIT) break;
+                if (seedSet.count(candidate)) continue;
+                if (forbidden.count(candidate)) continue;
+                seedSet.insert(candidate);
+                SpreadStats stats = simulateSpread(G, basePos, baseNeg, seedSet, -1);
+                double val = evaluateStats(stats);
+                if (val > bestValue + 1e-6) {
+                    seeds[j] = candidate;
+                    bestStats = stats;
+                    bestValue = val;
+                    replaced = true;
+                    break;
+                }
+                seedSet.erase(candidate);
+            }
+            if (!replaced) {
+                seedSet.insert(second);
+            }
+        }
+    }
+}
+
+static void refineSelection(DirectedGraph& G,
+        const unordered_set<int>& basePos,
+        const unordered_set<int>& baseNeg,
+        const vector<pair<int, double>>& ranking,
+        const unordered_set<int>& forbidden,
+        vector<int>& seeds,
+        SpreadStats& bestStats) {
+    if (seeds.empty()) return;
+    size_t phaseOneLimit = std::min<size_t>(ranking.size(), 600);
+    vector<int> phaseOneCandidates = collectTopCandidates(ranking, phaseOneLimit, forbidden);
+    dropReplaceRefinement(G, basePos, baseNeg, forbidden, phaseOneCandidates, seeds, bestStats, 3);
+
+    size_t phaseTwoLimit = std::min<size_t>(phaseOneCandidates.size(), static_cast<size_t>(300));
+    vector<int> phaseTwoCandidates;
+    if (phaseTwoLimit > 0 && !phaseOneCandidates.empty()) {
+        phaseTwoCandidates.assign(phaseOneCandidates.begin(), phaseOneCandidates.begin() + phaseTwoLimit);
+    }
+    pairwiseSwapRefinement(G, basePos, baseNeg, forbidden, phaseTwoCandidates, seeds, bestStats);
+
+    if (gSimulationCount < SIMULATION_LIMIT) {
+        unordered_set<int> finalSet(seeds.begin(), seeds.end());
+        bestStats = simulateSpread(G, basePos, baseNeg, finalSet, -1);
+    }
+}
+
+struct BeamState {
+    vector<int> seeds;
+    SpreadStats stats;
+    double value = numeric_limits<double>::lowest();
+};
+
+static pair<vector<int>, SpreadStats> runBeamSearch(DirectedGraph& G,
+        unsigned int numberOfSeeds,
+        const unordered_set<int>& basePos,
+        const unordered_set<int>& baseNeg,
+        const unordered_set<int>& forbidden,
+        const vector<int>& beamCandidates,
+        const SpreadStats& baseStats) {
+    pair<vector<int>, SpreadStats> best;
+    best.second = baseStats;
+    if (numberOfSeeds == 0 || beamCandidates.empty()) return best;
+
+    const size_t beamWidth = 5;
+    const size_t expansionsPerState = 60;
+    vector<BeamState> beam(1);
+    beam[0].stats = baseStats;
+    beam[0].value = evaluateStats(baseStats);
+
+    for (unsigned int depth = 0; depth < numberOfSeeds; ++depth) {
+        vector<BeamState> next;
+        for (const BeamState& state : beam) {
+            unordered_set<int> stateSet(state.seeds.begin(), state.seeds.end());
+            size_t expansions = 0;
+            for (int candidate : beamCandidates) {
+                if (stateSet.count(candidate)) continue;
+                if (forbidden.count(candidate)) continue;
+                SpreadStats stats = simulateSpread(G, basePos, baseNeg, stateSet, candidate);
+                BeamState newState = state;
+                newState.seeds.push_back(candidate);
+                newState.stats = stats;
+                newState.value = evaluateStats(stats);
+                next.push_back(std::move(newState));
+                ++expansions;
+                if (gSimulationCount >= SIMULATION_LIMIT) break;
+                if (expansions >= expansionsPerState) break;
+            }
+            if (gSimulationCount >= SIMULATION_LIMIT) break;
+        }
+        if (next.empty()) break;
+        sort(next.begin(), next.end(), [](const BeamState& a, const BeamState& b) {
+            if (a.value != b.value) return a.value > b.value;
+            return a.seeds < b.seeds;
+        });
+        if (next.size() > beamWidth) next.resize(beamWidth);
+        beam.swap(next);
+        if (beam.empty()) break;
+    }
+
+    if (!beam.empty() && beam.front().seeds.size() == numberOfSeeds) {
+        best.first = beam.front().seeds;
+        best.second = beam.front().stats;
+    }
+
+    return best;
 }
 
 static vector<int> buildCandidatePool(const vector<pair<int, double>>& ranking,
@@ -345,23 +520,16 @@ static vector<int> buildCandidatePool(const vector<pair<int, double>>& ranking,
         const unordered_set<int>& forbidden) {
     vector<int> pool;
     if (ranking.empty()) return pool;
-    size_t limit = static_cast<size_t>(numberOfSeeds) * 6;
-    limit = std::max<size_t>(limit, 120);
-    limit = std::min<size_t>(limit, 200);
+    size_t limit = std::max<size_t>(1000, static_cast<size_t>(numberOfSeeds) * 50);
     limit = std::min(limit, ranking.size());
     double topScore = ranking.front().second;
-    double threshold = topScore * 0.3;
-    const double riskLimit = 7.0;
+    double threshold = topScore * 0.05;
 
     for (size_t i = 0; i < ranking.size() && pool.size() < limit; ++i) {
         int node = ranking[i].first;
         double score = ranking[i].second;
         if (forbidden.count(node)) continue;
-        if (score < threshold && pool.size() + 10 < limit) continue;
-        double risk = getNodeRisk(node);
-        if (risk > riskLimit) continue;
-        int idx = getNodeIndex(node);
-        if (idx >= 0 && gScoreContext.negAdjPenalty[idx] > 3.5) continue;
+        if (score < threshold && pool.size() + 25 < limit) continue;
         pool.push_back(node);
     }
 
@@ -373,14 +541,18 @@ static unordered_set<int> runSeedSelection(DirectedGraph& G,
         const unordered_set<int>& basePos,
         const unordered_set<int>& baseNeg,
         const unordered_set<int>& forbidden) {
-    unordered_set<int> selected;
-    if (numberOfSeeds == 0 || G.getSize() == 0) return selected;
+    unordered_set<int> selectedSet;
+    size_t reserveSize = static_cast<size_t>(numberOfSeeds) * 2 + 8;
+    selectedSet.reserve(reserveSize);
+    vector<int> selectedOrder;
+    selectedOrder.reserve(static_cast<size_t>(numberOfSeeds) + 4);
+    if (numberOfSeeds == 0 || G.getSize() == 0) return selectedSet;
 
     prepareScoreContext(G, baseNeg, forbidden);
     resetSimulationBudget();
 
     vector<int> allNodes = gScoreContext.ready ? gScoreContext.nodes : G.getAllNodes();
-    if (allNodes.empty()) return selected;
+    if (allNodes.empty()) return selectedSet;
 
     vector<pair<int, double>> ranking;
     ranking.reserve(allNodes.size());
@@ -394,56 +566,76 @@ static unordered_set<int> runSeedSelection(DirectedGraph& G,
     });
 
     vector<int> candidatePool = buildCandidatePool(ranking, numberOfSeeds, forbidden);
-    if (candidatePool.empty()) {
-        fillWithHeuristics(ranking, allNodes, forbidden, selected, numberOfSeeds);
-        refineSelection(ranking, forbidden, numberOfSeeds, selected);
-        return selected;
-    }
 
-    SpreadStats currentStats = simulateSpread(G, basePos, baseNeg, selected, -1);
+    SpreadStats currentStats = simulateSpread(G, basePos, baseNeg, selectedSet, -1);
+    SpreadStats baseStats = currentStats;
 
-    priority_queue<CandidateEntry, vector<CandidateEntry>, CandidateComparator> heap;
-    for (int node : candidatePool) {
-        CandidateEntry entry;
-        entry.node = node;
-        entry.gain = numeric_limits<double>::lowest();
-        heap.push(entry);
-    }
-
-    while (!heap.empty() && selected.size() < numberOfSeeds) {
-        if (gSimulationCount >= SIMULATION_LIMIT) break;
-
-        CandidateEntry entry = heap.top();
-        heap.pop();
-
-        if (selected.count(entry.node)) continue;
-
-        if (entry.last_update == selected.size()) {
-            selected.insert(entry.node);
-            currentStats = entry.stats;
-            continue;
+    if (!candidatePool.empty()) {
+        priority_queue<CandidateEntry, vector<CandidateEntry>, CandidateComparator> heap;
+        for (int node : candidatePool) {
+            CandidateEntry entry;
+            entry.node = node;
+            heap.push(entry);
         }
 
-        SpreadStats stats = simulateSpread(G, basePos, baseNeg, selected, entry.node);
-        double dPos = double(stats.pos) - double(currentStats.pos);
-        double dNeg = double(stats.neg) - double(currentStats.neg);
-        double marginal = dPos * 1.35 - dNeg * 2.2;
-        entry.gain = marginal;
-        entry.last_update = selected.size();
-        entry.stats = stats;
+        while (!heap.empty() && selectedOrder.size() < numberOfSeeds) {
+            if (gSimulationCount >= SIMULATION_LIMIT) break;
 
-        bool negativeExplosion = stats.neg > stats.pos * 1.5 + 4 || (stats.neg - currentStats.neg) > 10;
-        if (entry.gain < -20.0 || negativeExplosion) continue;
-        heap.push(entry);
+            CandidateEntry entry = heap.top();
+            heap.pop();
+
+            if (selectedSet.count(entry.node)) continue;
+
+            if (entry.last_update == selectedOrder.size()) {
+                selectedSet.insert(entry.node);
+                selectedOrder.push_back(entry.node);
+                currentStats = entry.stats;
+                continue;
+            }
+
+            SpreadStats stats = simulateSpread(G, basePos, baseNeg, selectedSet, entry.node);
+            double marginal = evaluateStats(stats) - evaluateStats(currentStats);
+            entry.gain = marginal;
+            entry.last_update = selectedOrder.size();
+            entry.stats = stats;
+            heap.push(entry);
+        }
     }
 
-    if (selected.size() < numberOfSeeds) {
-        fillWithHeuristics(ranking, allNodes, forbidden, selected, numberOfSeeds);
+    if (selectedOrder.size() < numberOfSeeds) {
+        fillWithHeuristics(ranking, allNodes, forbidden, selectedSet, selectedOrder, numberOfSeeds);
+        if (!selectedOrder.empty() && gSimulationCount < SIMULATION_LIMIT) {
+            unordered_set<int> tmp(selectedOrder.begin(), selectedOrder.end());
+            currentStats = simulateSpread(G, basePos, baseNeg, tmp, -1);
+        }
     }
 
-    refineSelection(ranking, forbidden, numberOfSeeds, selected);
+    vector<int> refinedSeeds = selectedOrder;
+    if (refinedSeeds.size() > numberOfSeeds) refinedSeeds.resize(numberOfSeeds);
+    SpreadStats refinedStats = currentStats;
+    refineSelection(G, basePos, baseNeg, ranking, forbidden, refinedSeeds, refinedStats);
 
-    return selected;
+    vector<int> bestSeeds = refinedSeeds;
+    SpreadStats bestStats = refinedStats;
+
+    if (gSimulationCount < SIMULATION_LIMIT) {
+        size_t beamLimit = std::max<size_t>(200, static_cast<size_t>(numberOfSeeds) * 20);
+        beamLimit = std::min<size_t>(beamLimit, 450);
+        beamLimit = std::min(beamLimit, ranking.size());
+        vector<int> beamCandidates = collectTopCandidates(ranking, beamLimit, forbidden);
+        auto beamResult = runBeamSearch(G, numberOfSeeds, basePos, baseNeg, forbidden, beamCandidates, baseStats);
+        if (!beamResult.first.empty() && beamResult.first.size() == numberOfSeeds) {
+            double refinedValue = evaluateStats(bestStats);
+            double beamValue = evaluateStats(beamResult.second);
+            if (beamValue > refinedValue + 1e-6) {
+                bestSeeds = beamResult.first;
+                bestStats = beamResult.second;
+            }
+        }
+    }
+
+    unordered_set<int> finalSelection(bestSeeds.begin(), bestSeeds.end());
+    return finalSelection;
 }
 
 } // namespace student_algo_detail
