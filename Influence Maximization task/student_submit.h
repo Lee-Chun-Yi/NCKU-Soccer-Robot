@@ -98,11 +98,11 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 	vector<double> neg_coverage(N, 0.0);
 
 	// (A) 啟發式權重微調
-	const double LAMBDA = 1.0;   // 正向覆蓋增益
-	const double PHI = 1.0;   // 負向覆蓋懲罰
-	const double GAMMA = 0.25;  // 節點自身正門檻懲罰
-	const double DELTA = 0.2;   // 入邊正向強度懲罰（避免冗餘種子）
-	const double ETA = 0.15;  // 獎勵「不易變負」的強韌性 (從 0.0 調整)
+	const double LAMBDA = 1.35;   // 正向覆蓋增益
+	const double PHI = 0.65;   // 負向覆蓋懲罰
+	const double GAMMA = 0.18;  // 節點自身正門檻懲罰
+	const double DELTA = 0.12;   // 入邊正向強度懲罰（避免冗餘種子）
+	const double ETA = 0.32;  // 獎勵「不易變負」的強韌性 (從 0.0 調整)
 
 	auto is_forbidden = [&](int node) -> bool {
 		if (node == givenPosSeed) return true;
