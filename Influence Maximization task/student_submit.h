@@ -9,45 +9,38 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
-#include <queue> // CELF 最佳化需要優先佇列
+#include <queue>   // CELF 需要 priority_queue
 
 using namespace std;
 
 /**
- * @brief CELF 演算法所需的輔助結構
- * 用於 priority_queue，儲存節點的潛在邊際增益。
+ * @brief CELF 演算法所需的結構
  */
 struct NodeGain {
-	double score;    // 邊際增益分數
-	int node_id;  // 節點 ID
-	int round;    // 標記這個分數是在第幾輪 (k) 計算的
+	double score;   // 邊際增益
+	int    node_id; // 節點 ID
+	int    round;   // 此分數是在第幾輪 k 計算出來的
 
-	/**
-	 * @brief 重載 < 運算子
-	 * 使 std::priority_queue 預設成為「最大堆」(Max-Heap)，
-	 * 永遠優先處理分數最高的節點。
-	 */
-	bool operator<(const NodeGain& other) const {
+	// priority_queue 要成為 max-heap（score 越大越優先）
+	bool operator<(const NodeGain &other) const {
 		return score < other.score;
 	}
 };
 
-
 /**
- * @brief 影響力最大化主函數 (seedSelection)
- * 實作您設計的「1-hop 啟發式貪婪演算法」，並使用 CELF 最佳化 [1, 2, 3, 4]
- * 來避免 TLE (Time Limit Exceeded)。
+ * @brief 影響力最大化主函數
  *
- * @param G 評測系統傳入的圖
- * @param numberOfSeeds 要選擇的種子數量 (K)
- * @param givenPosSeed given positive seed provided by the dataset
- * @param givenNegSeeds given negative seeds provided by the dataset
- * @return std::unordered_set<int> 包含 K 個節點 ID 的最佳種子集 (如圖 4 所示)
+ * @param G              評測系統傳入的圖
+ * @param numberOfSeeds  要額外選擇的正向種子數量 K
+ * @param givenPosSeed   資料集中原本給定的正向種子
+ * @param givenNegSeeds  資料集中給定的負向種子集合
+ * @return unordered_set<int>  回傳 K 個額外種子節點 ID
  */
-unordered_set<int> seedSelection(DirectedGraph& G,
+unordered_set<int> seedSelection(DirectedGraph &G,
 	unsigned int numberOfSeeds,
 	int givenPosSeed,
-	const unordered_set<int>& givenNegSeeds) {
+	const unordered_set<int> &givenNegSeeds)
+{
 	unordered_set<int> seeds;
 	if (numberOfSeeds == 0) return seeds;
 
@@ -55,101 +48,154 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 	vector<int> nodes = G.getAllNodes();
 	if (nodes.empty()) return seeds;
 
-	// node id -> index (用於快速存取 vector)
+	const size_t N = nodes.size();
+	const double EPS = 1e-12;
+
+	// node id -> index (方便存取各種 vector)
 	unordered_map<int, size_t> id2idx;
-	id2idx.reserve(nodes.size() * 2);
-	for (size_t i = 0; i < nodes.size(); ++i) {
+	id2idx.reserve(N * 2);
+	for (size_t i = 0; i < N; ++i) {
 		id2idx[nodes[i]] = i;
 	}
 
-	const double EPS = 1e-12;
-	const size_t N = nodes.size();
-
-	// 預先計算每個節點的：
-	//  - 正向門檻 pos_th
-	//  - 負向門檻絕對值 neg_th_mag
-	//  - 入邊正向影響總和 in_strength
-	vector<double> pos_th(N, 0.0);
-	vector<double> neg_th_mag(N, 0.0);
-	vector<double> in_strength(N, 0.0);
+	// ------------------------------------------------------------
+	// 前處理：各節點的門檻與 in-edge 強度
+	// ------------------------------------------------------------
+	vector<double> pos_th(N, 0.0);      // 正門檻
+	vector<double> neg_th_mag(N, 0.0);  // 負門檻絕對值
+	vector<double> in_strength(N, 0.0); // 正向 in-edge 權重總和
 
 	for (size_t i = 0; i < N; ++i) {
 		int u = nodes[i];
-		double pth = G.getNodeThreshold(u);  // 正門檻
-		double nth = G.getNodeThreshold2(u); // 負門檻（通常為負值）
+
+		double pth = G.getNodeThreshold(u);   // 正門檻
+		double nth = G.getNodeThreshold2(u);  // 負門檻（多半為負）
 
 		pos_th[i] = std::max(EPS, pth);
 		neg_th_mag[i] = std::max(EPS, std::fabs(nth));
 
 		double sum_in = 0.0;
-		// 只累計正向入邊影響力（代表這個點本來就很容易被啟動）
 		vector<int> innei = G.getNodeInNeighbors(u);
-		for (int p : innei) {
+		for (size_t k = 0; k < innei.size(); ++k) {
+			int p = innei[k];
 			double w = G.getEdgeInfluence(p, u);
 			if (w > 0.0) sum_in += w;
 		}
 		in_strength[i] = sum_in;
 	}
 
-	// 覆蓋率：
-	//  pos_coverage[v] ∈ ：目前已選種子對 v 的正向門檻覆蓋比例
-	//  neg_coverage[v] ∈ ：目前已選種子對 v 的負向門檻覆蓋比例
-	vector<double> pos_coverage(N, 0.0);
-	vector<double> neg_coverage(N, 0.0);
+	// ------------------------------------------------------------
+	// 覆蓋率：目前所有種子對每個節點的正/負影響程度
+	// ------------------------------------------------------------
+	vector<double> pos_coverage(N, 0.0); // 0 ~ 1
+	vector<double> neg_coverage(N, 0.0); // 0 ~ 1
 
-	// (A) 啟發式權重微調
+	// ------------------------------------------------------------
+	// 啟發式權重參數（可以微調）
+	// ------------------------------------------------------------
 	const double LAMBDA = 1.0;   // 正向覆蓋增益
 	const double PHI = 1.0;   // 負向覆蓋懲罰
-	const double GAMMA = 0.25;  // 節點自身正門檻懲罰
-	const double DELTA = 0.2;   // 入邊正向強度懲罰（避免冗餘種子）
-	const double ETA = 0.15;  // 獎勵「不易變負」的強韌性 (從 0.0 調整)
+	const double GAMMA = 0.25;  // 自身正門檻懲罰
+	const double DELTA = 0.20;  // in-edge 正向強度懲罰
+	const double ETA = 0.20;  // 不易變負（負門檻大）獎勵
 
+	// 2-hop 相關參數
+	const double TWO_HOP_DECAY = 0.5; // 2-hop 路徑衰減
+	const double BETA1 = 0.6; // one-hop 結構分數權重
+	const double BETA2 = 0.4; // two-hop 結構分數權重
+
+	// ------------------------------------------------------------
+	// one-hop / two-hop 結構分數（與 coverage 無關的先驗）
+	// ------------------------------------------------------------
+	vector<double> one_hop_score(N, 0.0);
+	vector<double> two_hop_score(N, 0.0);
+
+	for (size_t iu = 0; iu < N; ++iu) {
+		int u = nodes[iu];
+		vector<int> out_u = G.getNodeOutNeighbors(u);
+
+		for (size_t a = 0; a < out_u.size(); ++a) {
+			int v = out_u[a];
+			unordered_map<int, size_t>::const_iterator itv = id2idx.find(v);
+			if (itv == id2idx.end()) continue;
+			size_t iv = itv->second;
+
+			double w_uv = G.getEdgeInfluence(u, v);
+			if (w_uv <= EPS) continue;                 // 只看正向邊
+			double contrib1 = w_uv / pos_th[iv];
+
+			one_hop_score[iu] += contrib1;
+
+			vector<int> out_v = G.getNodeOutNeighbors(v);
+			for (size_t b = 0; b < out_v.size(); ++b) {
+				int w = out_v[b];
+				unordered_map<int, size_t>::const_iterator itw = id2idx.find(w);
+				if (itw == id2idx.end()) continue;
+				size_t iw = itw->second;
+
+				double w_vw = G.getEdgeInfluence(v, w);
+				if (w_vw <= EPS) continue;             // 同樣只看正向邊
+				double contrib2 = w_vw / pos_th[iw];
+
+				two_hop_score[iu] += TWO_HOP_DECAY * contrib1 * contrib2;
+			}
+		}
+	}
+
+	// ------------------------------------------------------------
+	// 不能被選為種子的節點（原本的正/負種子）
+	// ------------------------------------------------------------
 	auto is_forbidden = [&](int node) -> bool {
 		if (node == givenPosSeed) return true;
 		return givenNegSeeds.find(node) != givenNegSeeds.end();
 	};
 
-
-	/**
-	 * @brief [Lambda] 計算節點 u 的邊際增益分數
-	 */
+	// ------------------------------------------------------------
+	// Lambda: 計算節點 u 在目前 coverage 下的邊際增益
+	// ------------------------------------------------------------
 	auto marginal_gain = [&](int u) -> double {
-		// 已經是種子就不再選
 		if (seeds.count(u) || is_forbidden(u)) {
 			return -std::numeric_limits<double>::infinity();
 		}
 
-		auto it_u = id2idx.find(u);
-		if (it_u == id2idx.end()) return -std::numeric_limits<double>::infinity();
+		unordered_map<int, size_t>::const_iterator it_u = id2idx.find(u);
+		if (it_u == id2idx.end()) {
+			return -std::numeric_limits<double>::infinity();
+		}
 		size_t iu = it_u->second;
 
-		// 基本分數：自己的門檻越高 / 入邊越強，分數越低
 		double score = 0.0;
+
+		// 節點自身性質：門檻越高或 in-edge 越強，越不適合當種子
 		score -= GAMMA * pos_th[iu];
 		score -= DELTA * in_strength[iu];
-		score += ETA * neg_th_mag[iu]; // (A) 獎勵強韌性
+		score += ETA * neg_th_mag[iu];
 
-		// 貢獻：正向出邊對鄰居的新增覆蓋
-		// 懲罰：負向出邊對鄰居的負向覆蓋
+		// 全域結構：一、二層鄰居的 broadcast 能力
+		score += BETA1 * one_hop_score[iu];
+		score += BETA2 * two_hop_score[iu];
+
+		// 1-hop 覆蓋增益 + 負向風險
 		vector<int> outnei = G.getNodeOutNeighbors(u);
-		for (int v : outnei) {
-			auto it_v = id2idx.find(v);
+		for (size_t t = 0; t < outnei.size(); ++t) {
+			int v = outnei[t];
+			unordered_map<int, size_t>::const_iterator it_v = id2idx.find(v);
 			if (it_v == id2idx.end()) continue;
 			size_t j = it_v->second;
 
 			double w = G.getEdgeInfluence(u, v);
 
 			if (w > EPS) {
-				// 正向邊：增加對 v 的正向覆蓋（以門檻做正規化）
+				// 正向邊：提高 v 變正的機率
 				double need = std::max(0.0, 1.0 - pos_coverage[j]);
 				if (need > 0.0) {
-					double add = w / pos_th[j];      // 這條邊若單獨作種子可覆蓋的比例
-					double eff = std::min(need, add); // 但不能超過尚未覆蓋的部分
+					double add = w / pos_th[j];
+					double eff = std::min(need, add);
 					score += LAMBDA * eff;
 				}
 			}
 			else if (w < -EPS) {
-				// 負向邊：這個候選種子若被選中，會對 v 增加變負的風險
+				// 負向邊：增加 v 變負的風險
 				double need_neg = std::max(0.0, 1.0 - neg_coverage[j]);
 				if (need_neg > 0.0) {
 					double add_neg = std::fabs(w) / neg_th_mag[j];
@@ -162,16 +208,17 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 		return score;
 	};
 
-	/**
-	 * @brief [Lambda] 選定某個 u 為種子時，更新所有鄰居的正/負覆蓋率
-	 */
+	// ------------------------------------------------------------
+	// Lambda: 把 u 當作種子，更新其 1-hop 鄰居的覆蓋率
+	// ------------------------------------------------------------
 	auto apply_influence = [&](int u) {
-		auto it_u = id2idx.find(u);
+		unordered_map<int, size_t>::const_iterator it_u = id2idx.find(u);
 		if (it_u == id2idx.end()) return;
 
 		vector<int> outnei = G.getNodeOutNeighbors(u);
-		for (int v : outnei) {
-			auto it_v = id2idx.find(v);
+		for (size_t t = 0; t < outnei.size(); ++t) {
+			int v = outnei[t];
+			unordered_map<int, size_t>::const_iterator it_v = id2idx.find(v);
 			if (it_v == id2idx.end()) continue;
 			size_t j = it_v->second;
 
@@ -192,68 +239,56 @@ unordered_set<int> seedSelection(DirectedGraph& G,
 		}
 	};
 
-
+	// 先把 givenPosSeed 的影響灌進 coverage（但不算在本函式回傳的種子裡）
 	if (id2idx.find(givenPosSeed) != id2idx.end()) {
 		apply_influence(givenPosSeed);
 	}
-	// --- (B) CELF 最佳化演算法 [1, 2, 3, 5] ---
 
-	// CELF 步驟 1: 初始計算 (k=0)
-	// 建立一個最大堆 (Max-Heap) [6, 7]
+	// ------------------------------------------------------------
+	// CELF 主流程
+	// ------------------------------------------------------------
 	std::priority_queue<NodeGain> pq;
-	// O(N * avg_degree)，計算所有節點的初始增益
-	for (int u : nodes) {
-		double sc = marginal_gain(u); // 此時 S 為空
-		// C++14 修正：必須明確使用類型建構 NodeGain
-		pq.push(NodeGain{ sc, u, 0 }); // 標記為第 0 輪計算
+
+	// 第 0 輪：計算所有節點的初始邊際增益
+	for (size_t i = 0; i < N; ++i) {
+		int u = nodes[i];
+		double sc = marginal_gain(u);
+		NodeGain ng;
+		ng.score = sc;
+		ng.node_id = u;
+		ng.round = 0;
+		pq.push(ng);
 	}
 
-	// CELF 步驟 2: 貪婪選出 K 個種子
+	// 逐一選出 K 個種子
 	for (unsigned int k = 0; k < numberOfSeeds && !pq.empty(); ++k) {
-
 		int bestNode = -1;
 
-		// CELF 步驟 2a: 懶惰評估 (Lazy Evaluation) [1, 8]
-		// 不斷從 pq 取出，直到找到一個「新鮮」的分數
-		while (true) {
-			// 取出目前分數最高的節點
+		// Lazy 更新：確保取出的分數是「在第 k 輪重新計算」過的
+		while (!pq.empty()) {
 			NodeGain top = pq.top();
 			pq.pop();
 
-			// 檢查分數是否「過期」
-			// 如果 top.round < k，代表這是 k-1 或更早的分數，
-			// 必須重新計算，因為 coverage 已經改變了。
-			if (top.round < k) {
-				// 重新計算真實的邊際增益
+			if (top.round < static_cast<int>(k)) {
 				double new_score = marginal_gain(top.node_id);
-
-				// C++14 修正：必須明確使用類型建構 NodeGain
-				// 將「更新」的分數和「本輪 (k)」的標記放回 pq
-				pq.push(NodeGain{ new_score, top.node_id, (int)k });
-
-				// 繼續迴圈，取出下一個最高分
-				continue;
-
+				NodeGain ng;
+				ng.score = new_score;
+				ng.node_id = top.node_id;
+				ng.round = static_cast<int>(k);
+				pq.push(ng);
 			}
 			else {
-				// top.round == k，這是在本輪 (k) 計算的
-				// (或從 k-1 輪繼承且尚未被 re-calc 的最高分)
-				// 這是本輪的真正最佳解。
 				bestNode = top.node_id;
-				break; // 結束 while(true)
+				break;
 			}
 		}
 
 		if (bestNode == -1) {
-			// 佇列為空或發生錯誤
 			break;
 		}
 
-		// CELF 步驟 2b: 選定種子並更新狀態
+		// 正式選為種子，並更新覆蓋率
 		seeds.insert(bestNode);
-
-		// **關鍵**：更新鄰居的覆蓋率
-		// 這會使其他節點的分數在 k+1 輪「過期」
 		apply_influence(bestNode);
 	}
 
