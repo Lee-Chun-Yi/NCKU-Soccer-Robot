@@ -307,4 +307,13 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 	return seeds;
 }
 
+inline unordered_set<int> seedSelection(
+        DirectedGraph& G,
+        unsigned int numberOfSeeds,
+        int /*givenPosSeed*/,
+        const unordered_set<int>& /*givenNegSeeds*/)
+{
+        return seedSelection(G, numberOfSeeds);
+}
+
 #endif
