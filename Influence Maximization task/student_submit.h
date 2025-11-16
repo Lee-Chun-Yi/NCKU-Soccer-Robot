@@ -309,6 +309,15 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int K) {
         }
     }
 
+    if (S.size() < K) {
+        for (int idx : ord) {
+            if (S.size() >= K) break;
+            int nid = c.nodeIds[idx];
+            if (banned.count(nid) || S.count(nid)) continue;
+            S.insert(nid);
+        }
+    }
+
     return S;
 }
 
