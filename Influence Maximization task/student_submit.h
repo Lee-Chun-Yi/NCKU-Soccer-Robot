@@ -1,89 +1,180 @@
-auto marginal_gain = [&](int u) -> double {
+// your_algorithm.h
+#ifndef YOUR_ALGORITHM_H
+#define YOUR_ALGORITHM_H
 
-    if (seeds.count(u) || is_forbidden(u)) 
-        return -1e18;
+#include "LT.h"
+#include "graph.h"
+#include <algorithm>
+#include <queue>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+#include <cmath>
+#include <chrono>
+#include <iostream>
 
-    size_t iu = id2idx[u];
+using namespace std;
+using Clock = chrono::steady_clock;
 
-    double score = 0.0;
+enum SizeClass { SMALL, MEDIUM, LARGE };
 
-    // (0) 基礎特性
-    score -= GAMMA * pos_th[iu];
-    score -= DELTA * in_strength[iu];
-    score += ETA * neg_th_mag[iu];
+SizeClass classifyGraphSize(DirectedGraph& G) {
+	int nodeCount = G.getSize();
+	int edgeCount = 0;
+	for (int u : G.getAllNodes()) {
+		edgeCount += G.getNodeOutNeighbors(u).size();
+	}
+	if (nodeCount <= 150) return SMALL;
+	if (nodeCount <= 1500) return MEDIUM;
+	return LARGE;
+}
 
-    // =============================
-    // (1) one-hop 正 / 負 覆蓋 (現有)
-    // =============================
-    for (int v : G.getNodeOutNeighbors(u)) {
-        size_t j = id2idx[v];
-        double w = G.getEdgeInfluence(u, v);
+unordered_set<int> seedSelectionSmall(DirectedGraph& G, unsigned int numberOfSeeds) {
+	unordered_set<int> seeds;
+	vector<int> nodes = G.getAllNodes();
+	unordered_map<int, int> id2idx;
+	for (size_t i = 0; i < nodes.size(); ++i) id2idx[nodes[i]] = i;
+	const int N = nodes.size();
+	vector<double> score(N, 0.0);
+	for (int i = 0; i < N; ++i) {
+		for (int v : G.getNodeOutNeighbors(nodes[i])) {
+			double w = G.getEdgeInfluence(nodes[i], v);
+			score[i] += max(0.0, w);
+		}
+	}
+	vector<int> order(N);
+	iota(order.begin(), order.end(), 0);
+	sort(order.begin(), order.end(), [&](int a, int b) { return score[a] > score[b]; });
+	for (int i = 0; i < N && seeds.size() < numberOfSeeds; ++i) seeds.insert(nodes[order[i]]);
+	return seeds;
+}
 
-        if (w > 0) {
-            double need = 1.0 - pos_coverage[j];
-            if (need > 0) {
-                double eff = min(need, w / pos_th[j]);
-                score += LAMBDA * eff;
-            }
-        } else if (w < 0) {
-            double needn = 1.0 - neg_coverage[j];
-            if (needn > 0) {
-                double effn = min(needn, fabs(w) / neg_th_mag[j]);
-                score -= PHI * effn;
-            }
-        }
-    }
+unordered_set<int> seedSelectionMedium(DirectedGraph& G, unsigned int numberOfSeeds) {
+	unordered_set<int> seeds;
+	vector<int> nodes = G.getAllNodes();
+	unordered_map<int, int> id2idx;
+	for (size_t i = 0; i < nodes.size(); ++i) id2idx[nodes[i]] = i;
+	const int N = nodes.size();
 
-    // =============================
-    // (2) 2-hop positive influence
-    // =============================
-    const double decay = 0.55;
-    for (int v : G.getNodeOutNeighbors(u)) {
-        double w_uv = G.getEdgeInfluence(u, v);
-        if (w_uv <= 0) continue;
+	vector<double> outSum(N, 0.0), posTh(N);
+	for (int i = 0; i < N; ++i) {
+		int u = nodes[i];
+		posTh[i] = max(1e-6, G.getNodeThreshold(u));
+		for (int v : G.getNodeOutNeighbors(u)) {
+			double w = G.getEdgeInfluence(u, v);
+			if (w > 0) outSum[i] += w;
+		}
+	}
 
-        for (int x : G.getNodeOutNeighbors(v)) {
-            double w_vx = G.getEdgeInfluence(v, x);
-            if (w_vx <= 0) continue;
+	vector<double> fastScore(N);
+	for (int i = 0; i < N; ++i) {
+		fastScore[i] = outSum[i] - 0.5 * posTh[i];
+	}
 
-            size_t ix = id2idx[x];
-            double add2 = (w_uv * w_vx) / pos_th[ix];
-            double needx = 1.0 - pos_coverage[ix];
-            if (needx > 0)
-                score += decay * min(needx, add2);
-        }
-    }
+	vector<int> order(N);
+	iota(order.begin(), order.end(), 0);
+	sort(order.begin(), order.end(), [&](int a, int b) { return fastScore[a] > fastScore[b]; });
 
-    // =============================
-    // (3) 2-hop negative risk
-    // =============================
-    const double decay_neg = 0.4;
-    for (int v : G.getNodeOutNeighbors(u)) {
-        double w_uv = G.getEdgeInfluence(u, v);
-        if (w_uv >= 0) continue;
+	int simLimit = min((int)N, 1000);
+	unordered_set<int> picked;
+	vector<double> marginal(N);
+	for (int i = 0; i < simLimit; ++i) {
+		int u = nodes[order[i]];
+		if (picked.count(u)) continue;
+		picked.insert(u);
+		unordered_set<int> tmpSeed = { u };
+		unordered_set<int> actPos, actNeg;
+		diffuse_signed_all(&G, tmpSeed, {}, actPos, actNeg);
+		marginal[order[i]] = actPos.size() - actNeg.size();
+	}
+	sort(order.begin(), order.end(), [&](int a, int b) { return marginal[a] > marginal[b]; });
+	for (int i = 0; i < N && seeds.size() < numberOfSeeds; ++i) seeds.insert(nodes[order[i]]);
+	return seeds;
+}
 
-        for (int x : G.getNodeOutNeighbors(v)) {
-            double w_vx = G.getEdgeInfluence(v, x);
-            if (w_vx <= 0) continue;
+unordered_set<int> seedSelectionLarge(DirectedGraph& G, unsigned int numberOfSeeds) {
+	unordered_set<int> seeds;
+	vector<int> nodes = G.getAllNodes();
+	unordered_map<int, int> id2idx;
+	for (size_t i = 0; i < nodes.size(); ++i) id2idx[nodes[i]] = i;
+	const int N = nodes.size();
 
-            size_t ix = id2idx[x];
-            double add2 = fabs(w_uv) * w_vx / neg_th_mag[ix];
-            double need = 1.0 - neg_coverage[ix];
-            if (need > 0)
-                score -= decay_neg * min(need, add2);
-        }
-    }
+	vector<double> outSum(N, 0.0), posTh(N);
+	vector<vector<pair<int, double>>> edge_out(N);
+	for (int i = 0; i < N; ++i) {
+		int u = nodes[i];
+		posTh[i] = max(1e-6, G.getNodeThreshold(u));
+		for (int v : G.getNodeOutNeighbors(u)) {
+			double w = G.getEdgeInfluence(u, v);
+			if (w > 0) outSum[i] += w;
+			edge_out[i].emplace_back(id2idx[v], w);
+		}
+	}
 
-    // =============================
-    // (4) overlap penalty (避免集中)
-    // =============================
-    double overlapPenalty = 0.12;
-    double overlap = 0.0;
-    for (int v : G.getNodeOutNeighbors(u)) {
-        size_t j = id2idx[v];
-        overlap += pos_coverage[j]; 
-    }
-    score -= overlapPenalty * overlap;
+	vector<double> negRisk(N, 0.0);
+	for (int i = 0; i < N; ++i) {
+		for (auto&[j, w] : edge_out[i]) {
+			if (w < 0) negRisk[i] += fabs(w);
+		}
+	}
 
-    return score;
-};
+	vector<int> comm(N, -1);
+	int commId = 0;
+	for (int i = 0; i < N; ++i) {
+		if (comm[i] != -1) continue;
+		queue<int> q;
+		q.push(i);
+		comm[i] = commId++;
+		while (!q.empty()) {
+			int u = q.front(); q.pop();
+			for (auto&[v, _] : edge_out[u]) {
+				if (comm[v] == -1) {
+					comm[v] = comm[u];
+					q.push(v);
+				}
+			}
+		}
+	}
+
+	vector<double> fastScore(N);
+	for (int i = 0; i < N; ++i) {
+		fastScore[i] = outSum[i] - 0.5 * posTh[i] - 0.4 * negRisk[i];
+	}
+
+	vector<int> order(N);
+	iota(order.begin(), order.end(), 0);
+	sort(order.begin(), order.end(), [&](int a, int b) { return fastScore[a] > fastScore[b]; });
+
+	int simLimit = min((int)N, 1500);
+	unordered_set<int> picked;
+	vector<double> marginal(N);
+	for (int i = 0; i < simLimit; ++i) {
+		int u = nodes[order[i]];
+		if (picked.count(u)) continue;
+		picked.insert(u);
+		unordered_set<int> tmpSeed = { u };
+		unordered_set<int> actPos, actNeg;
+		diffuse_signed_all(&G, tmpSeed, {}, actPos, actNeg);
+		double gain = actPos.size() - actNeg.size();
+		if (seeds.count(u)) gain -= 2.0;
+		marginal[order[i]] = gain;
+	}
+	sort(order.begin(), order.end(), [&](int a, int b) { return marginal[a] > marginal[b]; });
+	unordered_set<int> usedComm;
+	for (int i = 0; i < N && seeds.size() < numberOfSeeds; ++i) {
+		int u = nodes[order[i]];
+		if (usedComm.count(comm[order[i]])) continue;
+		seeds.insert(u);
+		usedComm.insert(comm[order[i]]);
+	}
+	return seeds;
+}
+
+unordered_set<int> autoStrategySeedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
+	SizeClass sz = classifyGraphSize(G);
+	if (sz == SMALL) return seedSelectionSmall(G, numberOfSeeds);
+	if (sz == MEDIUM) return seedSelectionMedium(G, numberOfSeeds);
+	return seedSelectionLarge(G, numberOfSeeds);
+}
+
+#endif
