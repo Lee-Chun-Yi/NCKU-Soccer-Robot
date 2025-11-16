@@ -247,22 +247,56 @@ static unordered_set<int> runSeedSelection(
         double currentSpread = baseResult.spread;
         int iteration = 0;
 
+        vector<int> neighborTouchCount(N, 0);
+        auto registerSeedNeighbors = [&](int nodeIdx) {
+                if (nodeIdx < 0 || nodeIdx >= static_cast<int>(N)) return;
+                for (const auto& edge : cache.outAdj[nodeIdx]) {
+                        if (edge.first >= 0 && edge.first < static_cast<int>(N)) {
+                                ++neighborTouchCount[edge.first];
+                        }
+                }
+        };
+        if (info.hasGiven) {
+                int idx = cache.indexOf(info.given);
+                if (idx >= 0) registerSeedNeighbors(idx);
+        }
+
+        vector<double> baseUpperBound(N, 0.0);
+        for (size_t i = 0; i < N; ++i) {
+                baseUpperBound[i] = cache.outStrength[i] + double(cache.outAdj[i].size());
+        }
+
+        auto computeAdjustedUB = [&](int nodeIdx) {
+                if (nodeIdx < 0 || nodeIdx >= static_cast<int>(N)) return 0.0;
+                double ub = baseUpperBound[nodeIdx];
+                int overlap = 0;
+                for (const auto& edge : cache.outAdj[nodeIdx]) {
+                        if (neighborTouchCount[edge.first] > 0) ++overlap;
+                }
+                ub -= double(overlap);
+                if (ub < 0.0) ub = 0.0;
+                return ub;
+        };
+
         struct CelfEntry {
                 int nodeId;
                 int nodeIdx;
-                double gain;
+                double mg1;
                 double totalSpread;
+                double mg2;
+                double totalSpread2;
                 int lastUpdate;
+                bool mg2Fresh;
         };
         struct CelfCompare {
                 bool operator()(const CelfEntry& a, const CelfEntry& b) const {
-                        if (a.gain != b.gain) return a.gain < b.gain;
+                        if (a.mg1 != b.mg1) return a.mg1 < b.mg1;
                         return a.nodeId > b.nodeId;
                 }
         };
 
         unordered_set<int> trialSeeds;
-        auto evaluateCandidate = [&](int nodeId, int nodeIdx, int iterationTag) {
+        auto evaluateCandidate = [&](int nodeId, int nodeIdx) {
                 trialSeeds.clear();
                 size_t requiredSize = workingSeeds.size() + 1;
                 if (trialSeeds.bucket_count() < requiredSize * 2) {
@@ -271,31 +305,68 @@ static unordered_set<int> runSeedSelection(
                 trialSeeds.insert(workingSeeds.begin(), workingSeeds.end());
                 trialSeeds.insert(nodeId);
                 FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
-                return CelfEntry{ nodeId, nodeIdx, result.spread - currentSpread, result.spread, iterationTag };
+                return pair<double, double>(result.spread - currentSpread, result.spread);
         };
 
         priority_queue<CelfEntry, vector<CelfEntry>, CelfCompare> pq;
+        double bestKnownGain = 0.0;
         for (int nodeIdx : candidateIndices) {
                 if (workingMask[nodeIdx] || bannedMask[nodeIdx]) continue;
                 int nodeId = cache.nodeIds[nodeIdx];
-                pq.push(evaluateCandidate(nodeId, nodeIdx, 0));
+                double ub = computeAdjustedUB(nodeIdx);
+                if (ub + 1e-9 < bestKnownGain) continue;
+                auto eval = evaluateCandidate(nodeId, nodeIdx);
+                bestKnownGain = max(bestKnownGain, eval.first);
+                pq.push(CelfEntry{ nodeId, nodeIdx, eval.first, eval.second, 0.0, 0.0, 0, false });
         }
 
-        while (seeds.size() < numberOfSeeds && !pq.empty()) {
-                CelfEntry top = pq.top();
-                pq.pop();
-                if (top.nodeIdx < 0 || top.nodeIdx >= static_cast<int>(N)) continue;
-                if (top.lastUpdate == iteration) {
-                        seeds.insert(top.nodeId);
-                        workingSeeds.insert(top.nodeId);
-                        workingMask[top.nodeIdx] = 1;
-                        currentSpread = top.totalSpread;
-                        ++iteration;
-                }
-                else {
+        auto finalizeSelection = [&](int nodeId, int nodeIdx, double newSpread) {
+                seeds.insert(nodeId);
+                workingSeeds.insert(nodeId);
+                workingMask[nodeIdx] = 1;
+                currentSpread = newSpread;
+                registerSeedNeighbors(nodeIdx);
+        };
+
+        while (seeds.size() < numberOfSeeds) {
+                bool selected = false;
+                while (!pq.empty() && !selected) {
+                        CelfEntry top = pq.top();
+                        pq.pop();
+                        if (top.nodeIdx < 0 || top.nodeIdx >= static_cast<int>(N)) continue;
                         if (workingMask[top.nodeIdx] || bannedMask[top.nodeIdx]) continue;
-                        pq.push(evaluateCandidate(top.nodeId, top.nodeIdx, iteration));
+                        double ub = computeAdjustedUB(top.nodeIdx);
+                        if (ub + 1e-9 < bestKnownGain) continue;
+                        if (top.lastUpdate == iteration) {
+                                bestKnownGain = max(bestKnownGain, top.mg1);
+                                finalizeSelection(top.nodeId, top.nodeIdx, top.totalSpread);
+                                ++iteration;
+                                selected = true;
+                                break;
+                        }
+
+                        double secondBest = pq.empty() ? -numeric_limits<double>::infinity() : pq.top().mg1;
+                        if (!top.mg2Fresh) {
+                                auto eval = evaluateCandidate(top.nodeId, top.nodeIdx);
+                                top.mg2 = eval.first;
+                                top.totalSpread2 = eval.second;
+                                top.mg2Fresh = true;
+                        }
+                        bestKnownGain = max(bestKnownGain, top.mg2);
+                        if (top.mg2 >= secondBest) {
+                                finalizeSelection(top.nodeId, top.nodeIdx, top.totalSpread2);
+                                ++iteration;
+                                selected = true;
+                        }
+                        else {
+                                top.mg1 = top.mg2;
+                                top.totalSpread = top.totalSpread2;
+                                top.lastUpdate = iteration;
+                                top.mg2Fresh = false;
+                                pq.push(top);
+                        }
                 }
+                if (!selected) break;
         }
 
         if (seeds.size() < numberOfSeeds) {
