@@ -13,6 +13,7 @@
 #include "LT.h"
 #include "graph.h"
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -180,17 +181,60 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int K) {
 
     size_t N = c.nodeIds.size();
 
+    bool small  = (N <= 200);
+    bool large  = (N > 5000);
+
+    struct SizeProfile {
+        double posCoeff;
+        double negPenalty;
+        double degCoeff;
+        double outCoeff;
+        double cutStd;
+        double cutExtra;
+        size_t candFloor;
+        size_t candPerK;
+        int refineBase;
+        int refinePasses;
+    } cfg;
+
+    if (small) {
+        cfg = {0.35, 0.90, 0.15, 1.35, -1.0, 0.0, N, N, 120, 2};
+    } else if (large) {
+        cfg = {0.65, 1.25, 0.03, 0.90, 1.1, 0.35, 180, 10, 15, 1};
+    } else {
+        cfg = {0.50, 1.00, 0.08, 1.10, 1.6, 0.40, 450, 25, 40, 1};
+    }
+
     // ----------------------------------------------------------------
-    // Fast score (same style as prev → maintain stability!)
+    // Fast score (size-aware tuning)
     // ----------------------------------------------------------------
     vector<double> sc(N);
     vector<double> negExp = computeNegExp(c, info.negatives);
 
+    double negSum = 0.0, negSq = 0.0;
+    for (double v : negExp) {
+        negSum += v;
+        negSq  += v * v;
+    }
+    double denom = max<size_t>(size_t(1), N);
+    double negAvg = negSum / double(denom);
+    double negVar = max(0.0, negSq / double(denom) - negAvg * negAvg);
+    double negStd = sqrt(negVar);
+    double negNorm = (negStd > 1e-9 ? negStd : (negAvg > 1e-9 ? negAvg : 1.0));
+    double negCut = numeric_limits<double>::infinity();
+    if (cfg.cutStd >= 0.0) {
+        double base = negAvg * (1.0 + cfg.cutExtra);
+        if (negStd > 1e-9) base += cfg.cutStd * negStd;
+        else base += cfg.cutStd * max(negAvg, 1e-6);
+        negCut = max(base, 0.0);
+    }
+
     for (size_t i = 0; i < N; ++i) {
-        double s = c.outW[i]
-                 + 0.05 * c.outAdj[i].size()
-                 - 0.55 * c.posT[i]
-                 - 0.75 * negExp[i];
+        double negScaled = negExp[i] / negNorm;
+        double s = cfg.outCoeff * c.outW[i]
+                 + cfg.degCoeff * double(c.outAdj[i].size())
+                 - cfg.posCoeff * c.posT[i]
+                 - cfg.negPenalty * negScaled;
         sc[i] = s;
     }
 
@@ -203,46 +247,87 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int K) {
     });
 
     // =================================================================
-    // LARGE dataset → keep EXACT prev strategy (fast + safe)
+    // Candidate pool (size aware)
     // =================================================================
-    if (N > 5000) {
-        for (int i : ord) {
-            if (S.size() >= K) break;
-            int nid = c.nodeIds[i];
-            if (!banned.count(nid)) S.insert(nid);
-        }
-        return S;
+    size_t candLimit = N;
+    if (!small) {
+        size_t perK = cfg.candPerK * max<size_t>(size_t(1), size_t(K));
+        candLimit = min<size_t>(N, max<size_t>(cfg.candFloor, perK));
     }
+    candLimit = max<size_t>(candLimit, min<size_t>(N, size_t(K)));
 
-    // =================================================================
-    // SMALL + MEDIUM → enhanced but SAFE search
-    // =================================================================
-    bool small = (N <= 200);
-
-    // Very moderate candidate pool (strong-prev v2 tuning)
-    int MIN_SIM = small ? N : 600;
-    int MULT    = small ? N : 30;
-
-    int target = max(MIN_SIM, MULT * (int)K);
-    if (target > (int)N) target = N;
-
+    vector<char> used(N, false);
     vector<int> cand;
-    cand.reserve(target);
-    for (int i = 0; i < target; ++i) {
-        int nid = c.nodeIds[ord[i]];
-        if (!banned.count(nid)) cand.push_back(nid);
-    }
+    cand.reserve(candLimit);
 
+    auto tryInsert = [&](int idx) {
+        if (used[idx]) return false;
+        int nid = c.nodeIds[idx];
+        if (banned.count(nid)) return false;
+        cand.push_back(nid);
+        used[idx] = true;
+        return true;
+    };
+
+    auto fillCand = [&](bool filter) {
+        for (int idx : ord) {
+            if (cand.size() >= candLimit) break;
+            if (used[idx]) continue;
+            if (filter && negCut < numeric_limits<double>::infinity() && negExp[idx] > negCut)
+                continue;
+            tryInsert(idx);
+        }
+    };
+
+    fillCand(true);
+    if (cand.size() < max<size_t>(size_t(K), candLimit / 3 + 1))
+        fillCand(false);
     if (cand.empty()) {
-        for (int nid : c.nodeIds) {
-            if (!banned.count(nid)) cand.push_back(nid);
-            if ((int)cand.size() >= target) break;
+        for (int idx : ord) {
+            if (cand.size() >= candLimit) break;
+            tryInsert(idx);
         }
     }
 
     unordered_set<int> neg = info.negatives;
     unordered_set<int> cur;
     if (info.hasGiven) cur.insert(info.given);
+
+    if (large) {
+        if (cand.empty()) {
+            for (int idx : ord) {
+                int nid = c.nodeIds[idx];
+                if (banned.count(nid)) continue;
+                cand.push_back(nid);
+                if (cand.size() >= max<size_t>(size_t(K), size_t(40))) break;
+            }
+        }
+
+        vector<pair<double,int>> ranked;
+        size_t evalLimit = min<size_t>(cand.size(), max<size_t>(size_t(2 * K), size_t(40)));
+        ranked.reserve(evalLimit);
+        for (size_t i = 0; i < evalLimit; ++i) {
+            unordered_set<int> tmp = cur;
+            tmp.insert(cand[i]);
+            double score = runSim(G, tmp, neg).s;
+            ranked.emplace_back(score, cand[i]);
+        }
+        sort(ranked.begin(), ranked.end(), [&](const auto& a, const auto& b){
+            if (a.first != b.first) return a.first > b.first;
+            return a.second < b.second;
+        });
+        for (auto& p : ranked) {
+            if (S.size() >= K) break;
+            S.insert(p.second);
+        }
+        if (S.size() < K) {
+            for (int nid : cand) {
+                if (S.size() >= K) break;
+                S.insert(nid);
+            }
+        }
+        return S;
+    }
 
     DiffRes base = runSim(G, cur, neg);
     double curS = base.s;
@@ -276,36 +361,63 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int K) {
         } else pq.push(eval(x.id, iter));
     }
 
+    // rebuild precise state after greedy loop
+    cur.clear();
+    if (info.hasGiven) cur.insert(info.given);
+    for (int v : S) cur.insert(v);
+    curS = runSim(G, cur, neg).s;
+
     // =====================================================================
-    // STRONG-PREV v2 — LIMITED refinement (safe)
+    // STRONG-PREV v2 — LIMITED refinement (size aware)
     // =====================================================================
-    if (!small) {
+    if (!cand.empty()) {
         vector<int> seedList(S.begin(), S.end());
         if (!seedList.empty()) {
-            int tryLimit = 80; // moderate
-            for (size_t idx = 0; idx < seedList.size(); ++idx) {
-                unordered_set<int> baseSet = cur;
-                baseSet.erase(seedList[idx]);
-                double bestLocal = curS;
-                int bestCand = seedList[idx];
-                int tried = 0;
-                for (int nid : cand) {
-                    if (baseSet.count(nid)) continue;
-                    unordered_set<int> test = baseSet;
-                    test.insert(nid);
-                    double sc = runSim(G, test, neg).s;
-                    ++tried;
-                    if (sc > bestLocal) {
-                        bestLocal = sc;
-                        bestCand = nid;
+            int tryLimit = min<int>(cfg.refineBase, (int)cand.size());
+            int passes = max(1, cfg.refinePasses);
+            unordered_set<int> curSeeds = cur;
+            double curScore = curS;
+            for (int pass = 0; pass < passes; ++pass) {
+                bool improved = false;
+                for (size_t idx = 0; idx < seedList.size(); ++idx) {
+                    int original = seedList[idx];
+                    unordered_set<int> baseSet = curSeeds;
+                    baseSet.erase(original);
+                    double bestLocal = runSim(G, baseSet, neg).s;
+                    int bestCand = original;
+                    int tried = 0;
+                    for (int nid : cand) {
+                        if (baseSet.count(nid)) continue;
+                        unordered_set<int> test = baseSet;
+                        test.insert(nid);
+                        double sc = runSim(G, test, neg).s;
+                        ++tried;
+                        if (sc > bestLocal) {
+                            bestLocal = sc;
+                            bestCand = nid;
+                        }
+                        if (tried >= tryLimit) break;
                     }
-                    if (tried >= tryLimit) break;
+                    if (bestCand != original) {
+                        seedList[idx] = bestCand;
+                        curSeeds = baseSet;
+                        curSeeds.insert(bestCand);
+                        curScore = bestLocal;
+                        improved = true;
+                    }
                 }
-                seedList[idx] = bestCand;
+                if (!improved) break;
+                cur = curSeeds;
+                curS = curScore;
             }
 
             S.clear();
             for (int v : seedList) S.insert(v);
+
+            cur.clear();
+            if (info.hasGiven) cur.insert(info.given);
+            for (int v : S) cur.insert(v);
+            curS = runSim(G, cur, neg).s;
         }
     }
 
