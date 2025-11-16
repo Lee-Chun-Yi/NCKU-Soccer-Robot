@@ -4,6 +4,7 @@
 #include "LT.h"
 #include "graph.h"
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -78,17 +79,18 @@ static const SeedInfo& getSeedInfo() {
 }
 
 struct GraphCache {
-	vector<int> nodeIds;
-	unordered_map<int, int> idToIndex;
-	vector<vector<pair<int, double>>> outAdj;
-	vector<double> posThreshold;
-	vector<double> negThreshold;
-	vector<double> outStrength;
+        vector<int> nodeIds;
+        unordered_map<int, int> idToIndex;
+        vector<vector<pair<int, double>>> outAdj;
+        vector<double> posThreshold;
+        vector<double> negThreshold;
+        vector<double> outStrength;
+        vector<double> inStrength;
 
-	int indexOf(int nodeId) const {
-		auto it = idToIndex.find(nodeId);
-		if (it == idToIndex.end()) return -1;
-		return it->second;
+        int indexOf(int nodeId) const {
+                auto it = idToIndex.find(nodeId);
+                if (it == idToIndex.end()) return -1;
+                return it->second;
 	}
 };
 
@@ -103,10 +105,11 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
 	}
 
 	size_t N = cache.nodeIds.size();
-	cache.outAdj.assign(N, {});
-	cache.posThreshold.assign(N, 0.0);
-	cache.negThreshold.assign(N, 0.0);
-	cache.outStrength.assign(N, 0.0);
+        cache.outAdj.assign(N, {});
+        cache.posThreshold.assign(N, 0.0);
+        cache.negThreshold.assign(N, 0.0);
+        cache.outStrength.assign(N, 0.0);
+        cache.inStrength.assign(N, 0.0);
 
 	for (size_t i = 0; i < N; ++i) {
 		int nodeId = cache.nodeIds[i];
@@ -118,13 +121,14 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
 		adj.reserve(outs.size());
 
 		double total = 0.0;
-		for (int nb : outs) {
-			double w = G.getEdgeInfluence(nodeId, nb);
-			total += w;
-			auto it = cache.idToIndex.find(nb);
-			if (it == cache.idToIndex.end()) continue;
-			adj.emplace_back(it->second, w);
-		}
+                for (int nb : outs) {
+                        double w = G.getEdgeInfluence(nodeId, nb);
+                        total += w;
+                        auto it = cache.idToIndex.find(nb);
+                        if (it == cache.idToIndex.end()) continue;
+                        adj.emplace_back(it->second, w);
+                        cache.inStrength[it->second] += w;
+                }
 
 		sort(adj.begin(), adj.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
 			if (a.first != b.first) return a.first < b.first;
@@ -138,15 +142,32 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
 }
 
 static vector<double> computeNegExposure(const GraphCache& cache, const unordered_set<int>& negSeeds) {
-	vector<double> exposure(cache.nodeIds.size(), 0.0);
-	if (cache.nodeIds.empty() || negSeeds.empty()) return exposure;
-	for (int id : negSeeds) {
-		int idx = cache.indexOf(id);
-		if (idx < 0) continue;
-		for (const auto& edge : cache.outAdj[idx])
-			exposure[edge.first] += edge.second;
-	}
-	return exposure;
+        vector<double> exposure(cache.nodeIds.size(), 0.0);
+        if (cache.nodeIds.empty() || negSeeds.empty()) return exposure;
+        for (int id : negSeeds) {
+                int idx = cache.indexOf(id);
+                if (idx < 0) continue;
+                for (const auto& edge : cache.outAdj[idx])
+                        exposure[edge.first] += edge.second;
+        }
+        return exposure;
+}
+
+static vector<double> computeFastScores(const GraphCache& cache, const vector<double>& negExposure) {
+        const size_t N = cache.nodeIds.size();
+        vector<double> score(N, 0.0);
+        for (size_t idx = 0; idx < N; ++idx) {
+                        double outStrength = cache.outStrength[idx];
+                        double inStrength = cache.inStrength[idx];
+                        double outDegree = static_cast<double>(cache.outAdj[idx].size());
+                        double exposure = negExposure.empty() ? 0.0 : negExposure[idx];
+                        double safeDistance = 1.0 / (1.0 + exposure);
+                        double posTh = cache.posThreshold[idx];
+                        double negThAbs = std::fabs(cache.negThreshold[idx]);
+                        score[idx] = outStrength + 0.3 * inStrength + 0.05 * outDegree +
+                                0.4 * safeDistance - 0.55 * posTh - 1.2 * negThAbs - 0.8 * exposure;
+        }
+        return score;
 }
 
 struct FullDiffResult {
@@ -180,119 +201,151 @@ static FullDiffResult runFullDiffusionSimulation(
  * �A�u�ݭn�^�Ǥ@�� unordered_set<int>�A�̭��� numberOfSeeds 9��positivate seed�s���C
  */
 unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
-	using namespace student_algo_detail;
+        using namespace student_algo_detail;
 
-	unordered_set<int> seeds;
-	if (numberOfSeeds == 0 || G.getSize() == 0) {
-		return seeds;
-	}
+        unordered_set<int> seeds;
+        if (numberOfSeeds == 0 || G.getSize() == 0) {
+                return seeds;
+        }
 
-	const GraphCache cache = buildGraphCache(G);
-	const SeedInfo& info = getSeedInfo();
+        const GraphCache cache = buildGraphCache(G);
+        const SeedInfo& info = getSeedInfo();
 
-	unordered_set<int> banned = info.negatives;
-	if (info.hasGiven) banned.insert(info.given);
+        unordered_set<int> banned = info.negatives;
+        if (info.hasGiven) banned.insert(info.given);
 
-	vector<double> negExposure = computeNegExposure(cache, info.negatives);
+        // Lightweight signals for every node. These are re-used across the adaptive branches
+        // so the pre-processing stays O(N + E).
+        vector<double> negExposure = computeNegExposure(cache, info.negatives);
+        vector<double> fastScore = computeFastScores(cache, negExposure);
 
-	const size_t N = cache.nodeIds.size();
-	vector<double> fastScore(N, 0.0);
-	for (size_t idx = 0; idx < N; ++idx) {
-		double score = cache.outStrength[idx];
-		score += 0.05 * double(cache.outAdj[idx].size());
-		score -= 0.55 * cache.posThreshold[idx];
-		if (!negExposure.empty()) score -= 0.8 * negExposure[idx];
-		fastScore[idx] = score;
-	}
+        const size_t N = cache.nodeIds.size();
+        vector<int> order;
+        order.reserve(N);
+        for (size_t i = 0; i < N; ++i) order.push_back(static_cast<int>(i));
+        sort(order.begin(), order.end(), [&](int a, int b) {
+                if (fastScore[a] != fastScore[b]) return fastScore[a] > fastScore[b];
+                return cache.nodeIds[a] < cache.nodeIds[b];
+        });
 
-	vector<int> order;
-	order.reserve(N);
-	for (size_t i = 0; i < N; ++i) order.push_back(static_cast<int>(i));
-	sort(order.begin(), order.end(), [&](int a, int b) {
-		if (fastScore[a] != fastScore[b]) return fastScore[a] > fastScore[b];
-		return cache.nodeIds[a] < cache.nodeIds[b];
-	});
+        const int nodeCount = G.getSize();
+        const int edgeCount = G.getEdgeNumber();
+        // Adaptive policy: brute-force small graphs, classic CELF for medium, aggressive pruning on large.
+        const bool isSmall = nodeCount <= 500;
+        const bool isLarge = (nodeCount > 5000) || (edgeCount > 200000);
+        const bool isMedium = !isSmall && !isLarge;
 
-	const int MIN_SIM = 400;
-	const int MULTIPLIER = 60;
-	int simulateCount = static_cast<int>(order.size());
-	int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
-	if (simulateCount > targetSim) simulateCount = targetSim;
+        size_t candidateLimit = order.size();
+        if (isMedium) {
+                size_t mediumTarget = max<size_t>(400, 40ull * numberOfSeeds);
+                candidateLimit = min(order.size(), mediumTarget);
+        }
+        else if (isLarge) {
+                size_t largeTarget = max<size_t>(200, 20ull * numberOfSeeds);
+                candidateLimit = min(order.size(), largeTarget);
+        }
 
-	vector<int> candidateNodes;
-	candidateNodes.reserve(simulateCount);
-	for (int i = 0; i < simulateCount && i < static_cast<int>(order.size()); ++i) {
-		int idx = order[i];
-		int nodeId = cache.nodeIds[idx];
-		if (banned.count(nodeId)) continue;
-		candidateNodes.push_back(nodeId);
-	}
-	if (candidateNodes.empty()) {
-		for (int nodeId : cache.nodeIds) {
-			if (banned.count(nodeId)) continue;
-			candidateNodes.push_back(nodeId);
-			if (static_cast<int>(candidateNodes.size()) >= targetSim) break;
-		}
-	}
+        // Nodes dominated by negative exposure rarely become active, so skip them (medium/large only).
+        const double exposureThreshold = isSmall ? 5.0 : (isLarge ? 0.8 : 1.5);
 
-	unordered_set<int> negSeedSet = info.negatives;
-	unordered_set<int> workingSeeds;
-	if (info.hasGiven) workingSeeds.insert(info.given);
-	FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
-	double currentSpread = baseResult.spread;
-	int iteration = 0;
+        vector<int> candidateNodes;
+        candidateNodes.reserve(candidateLimit);
+        for (int idx : order) {
+                int nodeId = cache.nodeIds[idx];
+                if (banned.count(nodeId)) continue;
+                if (!isSmall && !negExposure.empty() && negExposure[idx] > exposureThreshold) continue;
+                candidateNodes.push_back(nodeId);
+                if (!isSmall && candidateNodes.size() >= candidateLimit) break;
+        }
+        if (candidateNodes.empty()) {
+                for (int nodeId : cache.nodeIds) {
+                        if (banned.count(nodeId)) continue;
+                        candidateNodes.push_back(nodeId);
+                        if (!isSmall && candidateNodes.size() >= candidateLimit) break;
+                }
+        }
 
-	struct CelfEntry {
-		int nodeId;
-		double gain;
-		double totalSpread;
-		int lastUpdate;
-	};
-	struct CelfCompare {
-		bool operator()(const CelfEntry& a, const CelfEntry& b) const {
-			if (a.gain != b.gain) return a.gain < b.gain;
-			return a.nodeId > b.nodeId;
-		}
-	};
+        unordered_set<int> negSeedSet = info.negatives;
+        unordered_set<int> workingSeeds;
+        if (info.hasGiven) workingSeeds.insert(info.given);
+        // Keep the CELF base spread for marginal-gain measurements.
+        FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
+        double currentSpread = baseResult.spread;
+        int iteration = 0;
 
-	auto evaluateCandidate = [&](int nodeId, int iterationTag) {
-		unordered_set<int> trialSeeds = workingSeeds;
-		trialSeeds.insert(nodeId);
-		FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
-		return CelfEntry{ nodeId, result.spread - currentSpread, result.spread, iterationTag };
-	};
+        struct CelfEntry {
+                int nodeId;
+                double gain;
+                double totalSpread;
+                int lastUpdate;
+                bool exact;
+        };
+        struct CelfCompare {
+                bool operator()(const CelfEntry& a, const CelfEntry& b) const {
+                        if (a.gain != b.gain) return a.gain < b.gain;
+                        return a.nodeId > b.nodeId;
+                }
+        };
 
-	priority_queue<CelfEntry, vector<CelfEntry>, CelfCompare> pq;
-	for (int nodeId : candidateNodes) {
-		if (workingSeeds.count(nodeId)) continue;
-		pq.push(evaluateCandidate(nodeId, 0));
-	}
+        auto evaluateCandidate = [&](int nodeId, int iterationTag) {
+                unordered_set<int> trialSeeds = workingSeeds;
+                trialSeeds.insert(nodeId);
+                FullDiffResult result = runFullDiffusionSimulation(G, trialSeeds, negSeedSet);
+                return CelfEntry{ nodeId, result.spread - currentSpread, result.spread, iterationTag, true };
+        };
 
-	while (seeds.size() < numberOfSeeds && !pq.empty()) {
-		CelfEntry top = pq.top();
-		pq.pop();
-		if (workingSeeds.count(top.nodeId) || banned.count(top.nodeId)) continue;
-		if (top.lastUpdate == iteration) {
-			seeds.insert(top.nodeId);
-			workingSeeds.insert(top.nodeId);
-			currentSpread = top.totalSpread;
-			++iteration;
-		}
-		else {
-			pq.push(evaluateCandidate(top.nodeId, iteration));
-		}
-	}
+        auto makeApproxEntry = [&](int nodeId) {
+                int idx = cache.indexOf(nodeId);
+                double heuristic = (idx >= 0 ? fastScore[idx] : 0.0);
+                return CelfEntry{ nodeId, heuristic, currentSpread + heuristic, -1, false };
+        };
 
-	if (seeds.size() < numberOfSeeds) {
-		for (int idx : order) {
-			if (seeds.size() >= numberOfSeeds) break;
-			int nodeId = cache.nodeIds[idx];
-			if (banned.count(nodeId) || seeds.count(nodeId)) continue;
-			seeds.insert(nodeId);
-		}
-	}
+        priority_queue<CelfEntry, vector<CelfEntry>, CelfCompare> pq;
+        size_t initialEvalLimit = candidateNodes.size();
+        if (isLarge) {
+                size_t minEval = max<size_t>(50, 5ull * numberOfSeeds);
+                initialEvalLimit = min(candidateNodes.size(), minEval);
+        }
+        for (size_t i = 0; i < candidateNodes.size(); ++i) {
+                int nodeId = candidateNodes[i];
+                if (workingSeeds.count(nodeId)) continue;
+                // For large graphs, defer expensive simulations until a candidate floats to the top.
+                if (isLarge && i >= initialEvalLimit) {
+                        pq.push(makeApproxEntry(nodeId));
+                }
+                else {
+                        pq.push(evaluateCandidate(nodeId, 0));
+                }
+        }
 
-	return seeds;
+        while (seeds.size() < numberOfSeeds && !pq.empty()) {
+                CelfEntry top = pq.top();
+                pq.pop();
+                if (workingSeeds.count(top.nodeId) || banned.count(top.nodeId)) continue;
+
+                // Standard CELF lazy update: only recompute when the top entry is stale.
+                if (!top.exact || top.lastUpdate != iteration) {
+                        CelfEntry refreshed = evaluateCandidate(top.nodeId, iteration);
+                        pq.push(refreshed);
+                        continue;
+                }
+
+                seeds.insert(top.nodeId);
+                workingSeeds.insert(top.nodeId);
+                currentSpread = top.totalSpread;
+                ++iteration;
+        }
+
+        if (seeds.size() < numberOfSeeds) {
+                for (int idx : order) {
+                        if (seeds.size() >= numberOfSeeds) break;
+                        int nodeId = cache.nodeIds[idx];
+                        if (banned.count(nodeId) || seeds.count(nodeId)) continue;
+                        seeds.insert(nodeId);
+                }
+        }
+
+        return seeds;
 }
 
 #endif
