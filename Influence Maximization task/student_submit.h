@@ -13,7 +13,10 @@
 
 using namespace std;
 
-unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
+unordered_set<int> seedSelection(DirectedGraph& G,
+        unsigned int numberOfSeeds,
+        int givenPosSeed,
+        const unordered_set<int>& givenNegSeeds) {
 	unordered_set<int> seeds;
 	if (numberOfSeeds == 0 || G.getSize() == 0) return seeds;
 
@@ -73,16 +76,14 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 		static_score[i] = -GAMMA * pos_th[i] - DELTA * in_pos[i] + ETA * neg_th[i] + ALPHA * two_hop_score[i];
 	}
 
-	int givenSeed = -1;
-	ifstream fin("given_pos.txt");
-	if (fin >> givenSeed && id2idx.count(givenSeed)) {
-		int i = id2idx[givenSeed];
-		seeds.insert(givenSeed);
-		for (const auto&[j, w] : edge_out[i]) {
-			if (w > 0) pos_cov[j] += w / pos_th[j];
-			else if (w < 0) neg_cov[j] += fabs(w) / neg_th[j];
-		}
-	}
+        if (id2idx.count(givenPosSeed)) {
+                int i = id2idx[givenPosSeed];
+                seeds.insert(givenPosSeed);
+                for (const auto&[j, w] : edge_out[i]) {
+                        if (w > 0) pos_cov[j] += w / pos_th[j];
+                        else if (w < 0) neg_cov[j] += fabs(w) / neg_th[j];
+                }
+        }
 
 	unordered_set<int> used_comm;
 
