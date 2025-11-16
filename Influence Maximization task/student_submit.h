@@ -105,8 +105,10 @@ static DiffusionEstimate runPartialDiffusion(
     int expanded = 1;
 
     while (!q.empty()) {
-        auto [idx, depth] = q.front();
+        auto current = q.front();
         q.pop();
+        int idx = current.first;
+        int depth = current.second;
         if (depth >= maxDepth) continue;
 
         for (const auto& edge : cache.outAdj[idx]) {
@@ -206,6 +208,11 @@ static unordered_set<int> deterministicSelection(GraphCache& cache,
     }
     return selected;
 }
+
+unordered_set<int> seedSelection(DirectedGraph& G,
+        unsigned int numberOfSeeds,
+        int givenPosSeed,
+        const unordered_set<int>& givenNegSeeds);
 
 unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     unordered_set<int> empty;
