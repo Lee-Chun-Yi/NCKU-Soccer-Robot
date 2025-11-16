@@ -26,6 +26,31 @@ struct SeedInfo {
     unordered_set<int> negatives;
 };
 
+static SeedInfo cachedSeedInfo;
+static bool overrideSeedInfoActive = false;
+static SeedInfo overrideSeedInfo;
+
+struct SeedInfoOverrideGuard {
+    bool active = false;
+    SeedInfoOverrideGuard(int givenSeed, const unordered_set<int>& negSeeds) {
+        overrideSeedInfoActive = true;
+        active = true;
+        overrideSeedInfo = SeedInfo{};
+        overrideSeedInfo.loaded = true;
+        if (givenSeed >= 0) {
+            overrideSeedInfo.hasGiven = true;
+            overrideSeedInfo.given = givenSeed;
+        }
+        overrideSeedInfo.negatives = negSeeds;
+    }
+    ~SeedInfoOverrideGuard() {
+        if (active) {
+            overrideSeedInfoActive = false;
+            overrideSeedInfo = SeedInfo{};
+        }
+    }
+};
+
 static string joinPath(const string& dir, const string& file) {
     if (dir.empty()) return file;
     char tail = dir.back();
@@ -54,24 +79,24 @@ static vector<string> readCmdlineArgs() {
 }
 
 static const SeedInfo& getSeedInfo() {
-    static SeedInfo info;
-    if (info.loaded) return info;
-    info.loaded = true;
+    if (overrideSeedInfoActive) return overrideSeedInfo;
+    if (cachedSeedInfo.loaded) return cachedSeedInfo;
+    cachedSeedInfo.loaded = true;
 
     vector<string> args = readCmdlineArgs();
-    if (args.size() >= 2) info.dataDir = args[1];
-    if (info.dataDir.empty()) return info;
+    if (args.size() >= 2) cachedSeedInfo.dataDir = args[1];
+    if (cachedSeedInfo.dataDir.empty()) return cachedSeedInfo;
 
-    ifstream gp(joinPath(info.dataDir, "given_pos.txt"));
-    if (gp.is_open() && (gp >> info.given)) info.hasGiven = true;
+    ifstream gp(joinPath(cachedSeedInfo.dataDir, "given_pos.txt"));
+    if (gp.is_open() && (gp >> cachedSeedInfo.given)) cachedSeedInfo.hasGiven = true;
 
-    ifstream gn(joinPath(info.dataDir, "neg_seed.txt"));
+    ifstream gn(joinPath(cachedSeedInfo.dataDir, "neg_seed.txt"));
     if (gn.is_open()) {
         int val = 0;
-        while (gn >> val) info.negatives.insert(val);
+        while (gn >> val) cachedSeedInfo.negatives.insert(val);
     }
 
-    return info;
+    return cachedSeedInfo;
 }
 
 struct GraphCache {
@@ -295,6 +320,15 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     }
 
     return seeds;
+}
+
+unordered_set<int> seedSelection(DirectedGraph& G,
+                                 unsigned int numberOfSeeds,
+                                 int givenPosSeed,
+                                 const unordered_set<int>& negSeeds) {
+    using namespace student_algo_detail;
+    SeedInfoOverrideGuard guard(givenPosSeed, negSeeds);
+    return seedSelection(G, numberOfSeeds);
 }
 
 #endif
