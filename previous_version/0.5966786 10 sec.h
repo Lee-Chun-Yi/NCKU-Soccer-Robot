@@ -3,367 +3,261 @@
 
 #include "LT.h"
 #include "graph.h"
-#include <algorithm>
-#include <fstream>
-#include <iterator>
-#include <limits>
-#include <queue>
-#include <string>
-#include <unordered_map>
 #include <unordered_set>
-#include <utility>
 #include <vector>
+#include <unordered_map>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <queue> // CELF 最佳化需要優先佇列
 
 using namespace std;
 
-namespace student_algo_detail {
+/**
+ * @brief CELF 演算法所需的輔助結構
+ * 用於 priority_queue，儲存節點的潛在邊際增益。
+ */
+struct NodeGain {
+	double score;    // 邊際增益分數
+	int node_id;  // 節點 ID
+	int round;    // 標記這個分數是在第幾輪 (k) 計算的
 
-struct SeedInfo {
-	bool loaded = false;
-	bool hasGiven = false;
-	int given = -1;
-	string dataDir;
-	unordered_set<int> negatives;
-};
-
-static string joinPath(const string& dir, const string& file) {
-	if (dir.empty()) return file;
-	char tail = dir.back();
-	if (tail == '/' || tail == '\\') return dir + file;
-	return dir + "/" + file;
-}
-
-static vector<string> readCmdlineArgs() {
-	ifstream cmd("/proc/self/cmdline", ios::binary);
-	if (!cmd.is_open()) return {};
-	string raw((istreambuf_iterator<char>(cmd)), istreambuf_iterator<char>());
-	vector<string> args;
-	string current;
-	for (char c : raw) {
-		if (c == '\0') {
-			if (!current.empty()) {
-				args.push_back(current);
-				current.clear();
-			}
-		}
-		else {
-			current.push_back(c);
-		}
-	}
-	if (!current.empty()) args.push_back(current);
-	return args;
-}
-
-static const SeedInfo& getSeedInfo() {
-	static SeedInfo info;
-	if (info.loaded) return info;
-	info.loaded = true;
-
-	vector<string> args = readCmdlineArgs();
-	if (args.size() >= 2) info.dataDir = args[1];
-	if (info.dataDir.empty()) return info;
-
-	ifstream gp(joinPath(info.dataDir, "given_pos.txt"));
-	if (gp.is_open() && (gp >> info.given)) {
-		info.hasGiven = true;
-	}
-
-	ifstream gn(joinPath(info.dataDir, "neg_seed.txt"));
-	if (gn.is_open()) {
-		int val = 0;
-		while (gn >> val) info.negatives.insert(val);
-	}
-
-	return info;
-}
-
-struct GraphCache {
-	vector<int> nodeIds;
-	unordered_map<int, int> idToIndex;
-	vector<vector<pair<int, double>>> outAdj;
-	vector<double> posThreshold;
-	vector<double> negThreshold;
-	vector<double> outStrength;
-
-	int indexOf(int nodeId) const {
-		auto it = idToIndex.find(nodeId);
-		if (it == idToIndex.end()) return -1;
-		return it->second;
+	/**
+	 * @brief 重載 < 運算子
+	 * 使 std::priority_queue 預設成為「最大堆」(Max-Heap)，
+	 * 永遠優先處理分數最高的節點。
+	 */
+	bool operator<(const NodeGain& other) const {
+		return score < other.score;
 	}
 };
 
-static GraphCache buildGraphCache(DirectedGraph& G) {
-	GraphCache cache;
-	cache.nodeIds = G.getAllNodes();
-	sort(cache.nodeIds.begin(), cache.nodeIds.end());
 
-	cache.idToIndex.reserve(cache.nodeIds.size() * 2 + 1);
-	for (size_t i = 0; i < cache.nodeIds.size(); ++i) {
-		cache.idToIndex[cache.nodeIds[i]] = static_cast<int>(i);
+/**
+ * @brief 影響力最大化主函數 (seedSelection)
+ * 實作您設計的「1-hop 啟發式貪婪演算法」，並使用 CELF 最佳化 [1, 2, 3, 4]
+ * 來避免 TLE (Time Limit Exceeded)。
+ *
+ * @param G 評測系統傳入的圖
+ * @param numberOfSeeds 要選擇的種子數量 (K)
+ * @param givenPosSeed given positive seed provided by the dataset
+ * @param givenNegSeeds given negative seeds provided by the dataset
+ * @return std::unordered_set<int> 包含 K 個節點 ID 的最佳種子集 (如圖 4 所示)
+ */
+unordered_set<int> seedSelection(DirectedGraph& G,
+	unsigned int numberOfSeeds,
+	int givenPosSeed,
+	const unordered_set<int>& givenNegSeeds) {
+	unordered_set<int> seeds;
+	if (numberOfSeeds == 0) return seeds;
+
+	// 取得所有節點
+	vector<int> nodes = G.getAllNodes();
+	if (nodes.empty()) return seeds;
+
+	// node id -> index (用於快速存取 vector)
+	unordered_map<int, size_t> id2idx;
+	id2idx.reserve(nodes.size() * 2);
+	for (size_t i = 0; i < nodes.size(); ++i) {
+		id2idx[nodes[i]] = i;
 	}
 
-	size_t N = cache.nodeIds.size();
-	cache.outAdj.assign(N, {});
-	cache.posThreshold.assign(N, 0.0);
-	cache.negThreshold.assign(N, 0.0);
-	cache.outStrength.assign(N, 0.0);
+	const double EPS = 1e-12;
+	const size_t N = nodes.size();
+
+	// 預先計算每個節點的：
+	//  - 正向門檻 pos_th
+	//  - 負向門檻絕對值 neg_th_mag
+	//  - 入邊正向影響總和 in_strength
+	vector<double> pos_th(N, 0.0);
+	vector<double> neg_th_mag(N, 0.0);
+	vector<double> in_strength(N, 0.0);
 
 	for (size_t i = 0; i < N; ++i) {
-		int nodeId = cache.nodeIds[i];
-		cache.posThreshold[i] = G.getNodeThreshold(nodeId);
-		cache.negThreshold[i] = G.getNodeThreshold2(nodeId);
+		int u = nodes[i];
+		double pth = G.getNodeThreshold(u);  // 正門檻
+		double nth = G.getNodeThreshold2(u); // 負門檻（通常為負值）
 
-		vector<int> outs = G.getNodeOutNeighbors(nodeId);
-		auto& adj = cache.outAdj[i];
-		adj.reserve(outs.size());
+		pos_th[i] = std::max(EPS, pth);
+		neg_th_mag[i] = std::max(EPS, std::fabs(nth));
 
-		double total = 0.0;
-		for (int nb : outs) {
-			double w = G.getEdgeInfluence(nodeId, nb);
-			total += w;
-			auto it = cache.idToIndex.find(nb);
-			if (it == cache.idToIndex.end()) continue;
-			adj.emplace_back(it->second, w);
+		double sum_in = 0.0;
+		// 只累計正向入邊影響力（代表這個點本來就很容易被啟動）
+		vector<int> innei = G.getNodeInNeighbors(u);
+		for (int p : innei) {
+			double w = G.getEdgeInfluence(p, u);
+			if (w > 0.0) sum_in += w;
 		}
-
-		sort(adj.begin(), adj.end(), [](const pair<int, double>& a, const pair<int, double>& b) {
-			if (a.first != b.first) return a.first < b.first;
-			return a.second < b.second;
-		});
-
-		cache.outStrength[i] = total;
+		in_strength[i] = sum_in;
 	}
 
-	return cache;
-}
+	// 覆蓋率：
+	//  pos_coverage[v] ∈ ：目前已選種子對 v 的正向門檻覆蓋比例
+	//  neg_coverage[v] ∈ ：目前已選種子對 v 的負向門檻覆蓋比例
+	vector<double> pos_coverage(N, 0.0);
+	vector<double> neg_coverage(N, 0.0);
 
-struct PartialResult {
-	int posActive = 0;
-	int negActive = 0;
-	double depthWeightedPos = 0.0;
-	double depthWeightedNeg = 0.0;
-	int touched = 0;
-};
+	// (A) 啟發式權重微調
+	const double LAMBDA = 1.0;   // 正向覆蓋增益
+	const double PHI = 1.0;   // 負向覆蓋懲罰
+	const double GAMMA = 0.25;  // 節點自身正門檻懲罰
+	const double DELTA = 0.2;   // 入邊正向強度懲罰（避免冗餘種子）
+	const double ETA = 0.15;  // 獎勵「不易變負」的強韌性 (從 0.0 調整)
 
-struct FrontierNode {
-	int idx;
-	int depth;
-	int type; // +1 positive, -1 negative
-};
-
-static PartialResult runPartialDiffusion(const GraphCache& cache,
-	const vector<int>& posSeeds,
-	const vector<int>& negSeeds,
-	int maxDepth,
-	int visitLimit)
-{
-	PartialResult res;
-	const int N = static_cast<int>(cache.nodeIds.size());
-	if (N == 0) return res;
-	if (visitLimit <= 0) visitLimit = N;
-
-	vector<int8_t> state(N, 0);
-	vector<double> balance(N, 0.0);
-	vector<char> touched(N, 0);
-	queue<FrontierNode> q;
-
-	auto markTouched = [&](int idx) {
-		if (!touched[idx]) {
-			touched[idx] = 1;
-			++res.touched;
-		}
+	auto is_forbidden = [&](int node) -> bool {
+		if (node == givenPosSeed) return true;
+		return givenNegSeeds.find(node) != givenNegSeeds.end();
 	};
 
-	auto activate = [&](int idx, int type, int depth) {
-		state[idx] = static_cast<int8_t>(type);
-		markTouched(idx);
-		if (type == 1) {
-			++res.posActive;
-			res.depthWeightedPos += double(maxDepth - depth + 1);
-		} else {
-			++res.negActive;
-			res.depthWeightedNeg += double(maxDepth - depth + 1);
+
+	/**
+	 * @brief [Lambda] 計算節點 u 的邊際增益分數
+	 */
+	auto marginal_gain = [&](int u) -> double {
+		// 已經是種子就不再選
+		if (seeds.count(u) || is_forbidden(u)) {
+			return -std::numeric_limits<double>::infinity();
 		}
-		q.push({ idx, depth, type });
-	};
 
-	for (int idx : posSeeds)
-		if (idx >= 0 && idx < N && state[idx] == 0)
-			activate(idx, 1, 0);
+		auto it_u = id2idx.find(u);
+		if (it_u == id2idx.end()) return -std::numeric_limits<double>::infinity();
+		size_t iu = it_u->second;
 
-	for (int idx : negSeeds)
-		if (idx >= 0 && idx < N && state[idx] == 0)
-			activate(idx, -1, 0);
+		// 基本分數：自己的門檻越高 / 入邊越強，分數越低
+		double score = 0.0;
+		score -= GAMMA * pos_th[iu];
+		score -= DELTA * in_strength[iu];
+		score += ETA * neg_th_mag[iu]; // (A) 獎勵強韌性
 
-	bool limitReached = res.touched >= visitLimit;
-	while (!q.empty() && !limitReached) {
-		FrontierNode cur = q.front();
-		q.pop();
-		if (cur.depth >= maxDepth) continue;
-		const auto& neighbors = cache.outAdj[cur.idx];
-		for (const auto& edge : neighbors) {
-			int v = edge.first;
-			double w = edge.second;
-			if (!touched[v]) {
-				touched[v] = 1;
-				++res.touched;
-				if (res.touched >= visitLimit) {
-					limitReached = true;
+		// 貢獻：正向出邊對鄰居的新增覆蓋
+		// 懲罰：負向出邊對鄰居的負向覆蓋
+		vector<int> outnei = G.getNodeOutNeighbors(u);
+		for (int v : outnei) {
+			auto it_v = id2idx.find(v);
+			if (it_v == id2idx.end()) continue;
+			size_t j = it_v->second;
+
+			double w = G.getEdgeInfluence(u, v);
+
+			if (w > EPS) {
+				// 正向邊：增加對 v 的正向覆蓋（以門檻做正規化）
+				double need = std::max(0.0, 1.0 - pos_coverage[j]);
+				if (need > 0.0) {
+					double add = w / pos_th[j];      // 這條邊若單獨作種子可覆蓋的比例
+					double eff = std::min(need, add); // 但不能超過尚未覆蓋的部分
+					score += LAMBDA * eff;
 				}
 			}
-			balance[v] += (cur.type == 1 ? w : -w);
-			if (state[v] != 0) continue;
-			double val = balance[v];
-			if (val >= cache.posThreshold[v]) {
-				activate(v, 1, cur.depth + 1);
+			else if (w < -EPS) {
+				// 負向邊：這個候選種子若被選中，會對 v 增加變負的風險
+				double need_neg = std::max(0.0, 1.0 - neg_coverage[j]);
+				if (need_neg > 0.0) {
+					double add_neg = std::fabs(w) / neg_th_mag[j];
+					double eff_neg = std::min(need_neg, add_neg);
+					score -= PHI * eff_neg;
+				}
 			}
-			else if (val <= cache.negThreshold[v]) {
-				activate(v, -1, cur.depth + 1);
-			}
-			if (limitReached) break;
 		}
-	}
 
-	return res;
-}
-
-static vector<double> computeNegExposure(const GraphCache& cache, const unordered_set<int>& negSeeds) {
-	vector<double> exposure(cache.nodeIds.size(), 0.0);
-	if (cache.nodeIds.empty() || negSeeds.empty()) return exposure;
-	for (int id : negSeeds) {
-		int idx = cache.indexOf(id);
-		if (idx < 0) continue;
-		for (const auto& edge : cache.outAdj[idx])
-			exposure[edge.first] += edge.second;
-	}
-	return exposure;
-}
-
-} // namespace student_algo_detail
-
-/*
- * seedSelection:
- *   - G:   ��i��
- *   - numberOfSeeds: �ݭn�A�諸�u�B�~���V�ؤl�ƶq�v
- *                     �]�t�Υt�~�|�A�[�W 1 �� given_pos.txt �̪� positive seed�^
- *
- * �A�u�ݭn�^�Ǥ@�� unordered_set<int>�A�̭��� numberOfSeeds 9��positivate seed�s���C
- */
-unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
-	using namespace student_algo_detail;
-
-	unordered_set<int> seeds;
-	if (numberOfSeeds == 0 || G.getSize() == 0) {
-		return seeds;
-	}
-
-	const GraphCache cache = buildGraphCache(G);
-	const SeedInfo& info = getSeedInfo();
-
-	unordered_set<int> banned = info.negatives;
-	if (info.hasGiven) banned.insert(info.given);
-
-	vector<int> basePosIdx;
-	if (info.hasGiven) {
-		int idx = cache.indexOf(info.given);
-		if (idx >= 0) basePosIdx.push_back(idx);
-	}
-
-	vector<int> negSeedIdx;
-	negSeedIdx.reserve(info.negatives.size());
-	for (int neg : info.negatives) {
-		int idx = cache.indexOf(neg);
-		if (idx >= 0) negSeedIdx.push_back(idx);
-	}
-
-	constexpr int MAX_SIM_DEPTH = 3;
-	constexpr int MAX_VISIT = 2000;
-
-	PartialResult baseResult = runPartialDiffusion(cache, basePosIdx, negSeedIdx, MAX_SIM_DEPTH, MAX_VISIT);
-	const double baseSpread = double(baseResult.posActive - baseResult.negActive);
-	const double baseDepth = baseResult.depthWeightedPos - baseResult.depthWeightedNeg;
-
-	vector<double> negExposure = computeNegExposure(cache, info.negatives);
-
-	const size_t N = cache.nodeIds.size();
-	vector<double> fastScore(N, 0.0);
-	for (size_t idx = 0; idx < N; ++idx) {
-		double score = cache.outStrength[idx];
-		score += 0.05 * double(cache.outAdj[idx].size());
-		score -= 0.55 * cache.posThreshold[idx];
-		if (!negExposure.empty()) score -= 0.8 * negExposure[idx];
-		fastScore[idx] = score;
-	}
-
-	vector<int> order;
-	order.reserve(N);
-	for (size_t i = 0; i < N; ++i) order.push_back(static_cast<int>(i));
-	sort(order.begin(), order.end(), [&](int a, int b) {
-		if (fastScore[a] != fastScore[b]) return fastScore[a] > fastScore[b];
-		return cache.nodeIds[a] < cache.nodeIds[b];
-	});
-
-	const int MIN_SIM = 400;
-	const int MULTIPLIER = 60;
-	int simulateCount = static_cast<int>(order.size());
-	int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
-	if (simulateCount > targetSim) simulateCount = targetSim;
-
-	vector<double> detailedScore(N, numeric_limits<double>::lowest());
-	vector<int> workingSeeds;
-	workingSeeds.reserve(basePosIdx.size() + 1);
-
-	for (int i = 0; i < simulateCount; ++i) {
-		int idx = order[i];
-		int nodeId = cache.nodeIds[idx];
-		if (banned.count(nodeId)) continue;
-
-		workingSeeds = basePosIdx;
-		workingSeeds.push_back(idx);
-
-		PartialResult result = runPartialDiffusion(cache, workingSeeds, negSeedIdx, MAX_SIM_DEPTH, MAX_VISIT);
-		double spreadGain = double(result.posActive - result.negActive) - baseSpread;
-		double depthGain = (result.depthWeightedPos - result.depthWeightedNeg) - baseDepth;
-		double score = spreadGain * 1.4 + depthGain * 0.45
-			+ cache.outStrength[idx] * 0.55
-			- cache.posThreshold[idx] * 0.35
-			- negExposure[idx] * 0.7;
-		detailedScore[idx] = score;
-	}
-
-	struct CandidateScore {
-		int nodeId;
-		double score;
+		return score;
 	};
-	vector<CandidateScore> ranked;
-	ranked.reserve(N);
-	for (size_t idx = 0; idx < N; ++idx) {
-		int nodeId = cache.nodeIds[idx];
-		if (banned.count(nodeId)) continue;
-		double score = detailedScore[idx];
-		if (score == numeric_limits<double>::lowest()) score = fastScore[idx];
-		ranked.push_back({ nodeId, score });
-	}
 
-	sort(ranked.begin(), ranked.end(), [](const CandidateScore& a, const CandidateScore& b) {
-		if (a.score != b.score) return a.score > b.score;
-		return a.nodeId < b.nodeId;
-	});
+	/**
+	 * @brief [Lambda] 選定某個 u 為種子時，更新所有鄰居的正/負覆蓋率
+	 */
+	auto apply_influence = [&](int u) {
+		auto it_u = id2idx.find(u);
+		if (it_u == id2idx.end()) return;
 
-	for (const auto& cand : ranked) {
-		if (seeds.size() >= numberOfSeeds) break;
-		if (!banned.count(cand.nodeId)) seeds.insert(cand.nodeId);
-	}
+		vector<int> outnei = G.getNodeOutNeighbors(u);
+		for (int v : outnei) {
+			auto it_v = id2idx.find(v);
+			if (it_v == id2idx.end()) continue;
+			size_t j = it_v->second;
 
-	if (seeds.size() < numberOfSeeds) {
-		for (int nodeId : cache.nodeIds) {
-			if (seeds.size() >= numberOfSeeds) break;
-			if (banned.count(nodeId)) continue;
-			seeds.insert(nodeId);
+			double w = G.getEdgeInfluence(u, v);
+
+			if (w > EPS) {
+				double add = w / pos_th[j];
+				if (add > 0.0) {
+					pos_coverage[j] = std::min(1.0, pos_coverage[j] + add);
+				}
+			}
+			else if (w < -EPS) {
+				double add_neg = std::fabs(w) / neg_th_mag[j];
+				if (add_neg > 0.0) {
+					neg_coverage[j] = std::min(1.0, neg_coverage[j] + add_neg);
+				}
+			}
 		}
+	};
+
+
+	if (id2idx.find(givenPosSeed) != id2idx.end()) {
+		apply_influence(givenPosSeed);
+	}
+	// --- (B) CELF 最佳化演算法 [1, 2, 3, 5] ---
+
+	// CELF 步驟 1: 初始計算 (k=0)
+	// 建立一個最大堆 (Max-Heap) [6, 7]
+	std::priority_queue<NodeGain> pq;
+	// O(N * avg_degree)，計算所有節點的初始增益
+	for (int u : nodes) {
+		double sc = marginal_gain(u); // 此時 S 為空
+		// C++14 修正：必須明確使用類型建構 NodeGain
+		pq.push(NodeGain{ sc, u, 0 }); // 標記為第 0 輪計算
+	}
+
+	// CELF 步驟 2: 貪婪選出 K 個種子
+	for (unsigned int k = 0; k < numberOfSeeds && !pq.empty(); ++k) {
+
+		int bestNode = -1;
+
+		// CELF 步驟 2a: 懶惰評估 (Lazy Evaluation) [1, 8]
+		// 不斷從 pq 取出，直到找到一個「新鮮」的分數
+		while (true) {
+			// 取出目前分數最高的節點
+			NodeGain top = pq.top();
+			pq.pop();
+
+			// 檢查分數是否「過期」
+			// 如果 top.round < k，代表這是 k-1 或更早的分數，
+			// 必須重新計算，因為 coverage 已經改變了。
+			if (top.round < k) {
+				// 重新計算真實的邊際增益
+				double new_score = marginal_gain(top.node_id);
+
+				// C++14 修正：必須明確使用類型建構 NodeGain
+				// 將「更新」的分數和「本輪 (k)」的標記放回 pq
+				pq.push(NodeGain{ new_score, top.node_id, (int)k });
+
+				// 繼續迴圈，取出下一個最高分
+				continue;
+
+			}
+			else {
+				// top.round == k，這是在本輪 (k) 計算的
+				// (或從 k-1 輪繼承且尚未被 re-calc 的最高分)
+				// 這是本輪的真正最佳解。
+				bestNode = top.node_id;
+				break; // 結束 while(true)
+			}
+		}
+
+		if (bestNode == -1) {
+			// 佇列為空或發生錯誤
+			break;
+		}
+
+		// CELF 步驟 2b: 選定種子並更新狀態
+		seeds.insert(bestNode);
+
+		// **關鍵**：更新鄰居的覆蓋率
+		// 這會使其他節點的分數在 k+1 輪「過期」
+		apply_influence(bestNode);
 	}
 
 	return seeds;
 }
 
-#endif
+#endif // YOUR_ALGORITHM_H
