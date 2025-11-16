@@ -12,11 +12,41 @@
 #include <cmath>
 #include <chrono>
 #include <iostream>
+#include <numeric>
+#include <iterator>
 
 using namespace std;
 using Clock = chrono::steady_clock;
 
 enum SizeClass { SMALL, MEDIUM, LARGE };
+
+vector<int> rankNodesByHeuristic(DirectedGraph& G) {
+        vector<int> nodes = G.getAllNodes();
+        vector<double> score(nodes.size(), 0.0);
+        for (size_t i = 0; i < nodes.size(); ++i) {
+                int u = nodes[i];
+                double posTh = max(1e-6, G.getNodeThreshold(u));
+                double negTh = fabs(G.getNodeThreshold2(u));
+                const vector<int> outs = G.getNodeOutNeighbors(u);
+                double posSum = 0.0, negSum = 0.0;
+                for (int v : outs) {
+                        double w = G.getEdgeInfluence(u, v);
+                        if (w >= 0) posSum += w;
+                        else negSum += fabs(w);
+                }
+                score[i] = posSum - 0.35 * posTh - 0.25 * negTh - 0.15 * negSum + 0.02 * outs.size();
+        }
+        vector<int> order(nodes.size());
+        iota(order.begin(), order.end(), 0);
+        sort(order.begin(), order.end(), [&](int a, int b) {
+                if (fabs(score[a] - score[b]) > 1e-9) return score[a] > score[b];
+                return nodes[a] < nodes[b];
+        });
+        vector<int> ranked;
+        ranked.reserve(nodes.size());
+        for (int idx : order) ranked.push_back(nodes[idx]);
+        return ranked;
+}
 
 SizeClass classifyGraphSize(DirectedGraph& G) {
 	int nodeCount = G.getSize();
@@ -112,11 +142,12 @@ unordered_set<int> seedSelectionLarge(DirectedGraph& G, unsigned int numberOfSee
 	}
 
 	vector<double> negRisk(N, 0.0);
-	for (int i = 0; i < N; ++i) {
-		for (auto&[j, w] : edge_out[i]) {
-			if (w < 0) negRisk[i] += fabs(w);
-		}
-	}
+        for (int i = 0; i < N; ++i) {
+                for (auto& edgeInfo : edge_out[i]) {
+                        double w = edgeInfo.second;
+                        if (w < 0) negRisk[i] += fabs(w);
+                }
+        }
 
 	vector<int> comm(N, -1);
 	int commId = 0;
@@ -125,15 +156,16 @@ unordered_set<int> seedSelectionLarge(DirectedGraph& G, unsigned int numberOfSee
 		queue<int> q;
 		q.push(i);
 		comm[i] = commId++;
-		while (!q.empty()) {
-			int u = q.front(); q.pop();
-			for (auto&[v, _] : edge_out[u]) {
-				if (comm[v] == -1) {
-					comm[v] = comm[u];
-					q.push(v);
-				}
-			}
-		}
+                while (!q.empty()) {
+                        int u = q.front(); q.pop();
+                        for (auto& edgeInfo : edge_out[u]) {
+                                int v = edgeInfo.first;
+                                if (comm[v] == -1) {
+                                        comm[v] = comm[u];
+                                        q.push(v);
+                                }
+                        }
+                }
 	}
 
 	vector<double> fastScore(N);
@@ -171,10 +203,61 @@ unordered_set<int> seedSelectionLarge(DirectedGraph& G, unsigned int numberOfSee
 }
 
 unordered_set<int> autoStrategySeedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
-	SizeClass sz = classifyGraphSize(G);
-	if (sz == SMALL) return seedSelectionSmall(G, numberOfSeeds);
-	if (sz == MEDIUM) return seedSelectionMedium(G, numberOfSeeds);
-	return seedSelectionLarge(G, numberOfSeeds);
+        SizeClass sz = classifyGraphSize(G);
+        if (sz == SMALL) return seedSelectionSmall(G, numberOfSeeds);
+        if (sz == MEDIUM) return seedSelectionMedium(G, numberOfSeeds);
+        return seedSelectionLarge(G, numberOfSeeds);
+}
+
+unordered_set<int> seedSelection(DirectedGraph& G,
+                unsigned int numberOfSeeds,
+                int givenPosSeed,
+                const unordered_set<int>& givenNegSeeds) {
+        unordered_set<int> forbidden = givenNegSeeds;
+        forbidden.insert(givenPosSeed);
+
+        unordered_set<int> initial = autoStrategySeedSelection(G, min<unsigned int>(numberOfSeeds, G.getSize()));
+        for (int f : forbidden) initial.erase(f);
+
+        vector<int> ranking = rankNodesByHeuristic(G);
+        unordered_set<int> result;
+        result.reserve(numberOfSeeds * 2);
+
+        for (int node : ranking) {
+                if (result.size() == numberOfSeeds) break;
+                if (forbidden.count(node)) continue;
+                if (initial.count(node)) result.insert(node);
+        }
+        for (int node : ranking) {
+                if (result.size() == numberOfSeeds) break;
+                if (forbidden.count(node) || result.count(node)) continue;
+                result.insert(node);
+        }
+
+        if (result.size() < numberOfSeeds) {
+                for (int node : ranking) {
+                        if (result.size() == numberOfSeeds) break;
+                        if (forbidden.count(node)) continue;
+                        result.insert(node);
+                }
+        }
+
+        if (result.size() > numberOfSeeds) {
+                vector<int> ordered(result.begin(), result.end());
+                sort(ordered.begin(), ordered.end(), [&](int a, int b) {
+                        auto ia = find(ranking.begin(), ranking.end(), a);
+                        auto ib = find(ranking.begin(), ranking.end(), b);
+                        return distance(ranking.begin(), ia) < distance(ranking.begin(), ib);
+                });
+                unordered_set<int> trimmed;
+                for (int node : ordered) {
+                        if (trimmed.size() == numberOfSeeds) break;
+                        trimmed.insert(node);
+                }
+                result.swap(trimmed);
+        }
+
+        return result;
 }
 
 #endif
