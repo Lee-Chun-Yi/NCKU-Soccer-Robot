@@ -1,6 +1,20 @@
 #ifndef YOUR_ALGORITHM_H
 #define YOUR_ALGORITHM_H
 
+// ============================================================
+// SMALL-MAX VERSION (專門強化 Small = ~100 nodes)
+//   * 以 medium 格式作為參考
+//   * Small (N ≤ 200): 直接最大化 Active Rate，使用「完全枚舉般」的
+//       - 全節點做擴散模擬
+//       - 全組合 greedy（非常 aggressive）
+//       - 第 1 種子：模擬所有節點。
+//       - 第 2~K 種子：對所有未選節點執行 AR 模擬。
+//   * Medium: 使用上一版 medium-tuned（保持穩定）
+//   * Large: fastScore-only（維持速度）
+// ============================================================
+
+#define YOUR_ALGORITHM_H
+
 // Medium-tuned version
 //  - SMALL  (N <= 200): AR-based greedy using all nodes
 //  - MEDIUM (200 < N <= 5000): AR-based greedy with candidate pool tuned for N≈1000
