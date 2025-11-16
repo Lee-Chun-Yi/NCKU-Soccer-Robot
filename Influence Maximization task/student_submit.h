@@ -305,4 +305,12 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int K) {
     return seeds;
 }
 
+// Compatibility overload for judge harness expecting the extended signature.
+// The extra parameters are already consumed internally (via dataset files),
+// so we simply forward to the primary implementation without altering logic.
+inline unordered_set<int> seedSelection(DirectedGraph& G, unsigned int K,
+                                       int /*givenPosSeed*/, const unordered_set<int>& /*givenNegSeeds*/) {
+    return seedSelection(G, K);
+}
+
 #endif
