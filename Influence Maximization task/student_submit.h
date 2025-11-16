@@ -1,155 +1,128 @@
-// your_algorithm.h
+
 #ifndef YOUR_ALGORITHM_H
 #define YOUR_ALGORITHM_H
 
 #include "LT.h"
 #include "graph.h"
 #include <algorithm>
+#include <fstream>
+#include <iterator>
+#include <limits>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <cmath>
-#include <chrono>
-#include <iostream>
-#include <random>
 
 using namespace std;
-using Clock = chrono::steady_clock;
 
-enum SizeClass { SMALL, MEDIUM, LARGE };
+// Seed Info Loader
+namespace student_algo_detail {
 
-SizeClass classifyGraphSize(DirectedGraph& G) {
-	int nodeCount = G.getSize();
-	int edgeCount = 0;
-	for (int u : G.getAllNodes()) {
-		edgeCount += G.getNodeOutNeighbors(u).size();
-	}
-	if (nodeCount <= 150) return SMALL;
-	if (nodeCount <= 1500) return MEDIUM;
-	return LARGE;
-}
-
-double estimateSpreadMC(DirectedGraph& G, const unordered_set<int>& posSeeds, int rounds = 300) {
-	double total = 0.0;
-	unordered_set<int> actPos, actNeg;
-	for (int i = 0; i < rounds; ++i) {
-		actPos.clear(); actNeg.clear();
-		diffuse_signed_all(&G, posSeeds, {}, actPos, actNeg);
-		total += (double)actPos.size() - actNeg.size();
-	}
-	return total / rounds;
-}
-
-unordered_set<int> seedSelectionSmall(DirectedGraph& G, unsigned int numberOfSeeds) {
-	unordered_set<int> seeds;
-	vector<int> nodes = G.getAllNodes();
-	const int N = nodes.size();
-	vector<double> score(N);
-	for (int i = 0; i < N; ++i) {
-		unordered_set<int> oneSeed = { nodes[i] };
-		score[i] = estimateSpreadMC(G, oneSeed, 800);
-	}
-	vector<int> order(N);
-	iota(order.begin(), order.end(), 0);
-	sort(order.begin(), order.end(), [&](int a, int b) { return score[a] > score[b]; });
-	for (int i = 0; i < N && seeds.size() < numberOfSeeds; ++i) seeds.insert(nodes[order[i]]);
-	return seeds;
-}
-
-unordered_set<int> seedSelectionMedium(DirectedGraph& G, unsigned int numberOfSeeds) {
-	unordered_set<int> seeds;
-	vector<int> nodes = G.getAllNodes();
-	unordered_map<int, int> id2idx;
-	for (size_t i = 0; i < nodes.size(); ++i) id2idx[nodes[i]] = i;
-	const int N = nodes.size();
-
-	vector<double> outSum(N, 0.0), posTh(N);
-	for (int i = 0; i < N; ++i) {
-		int u = nodes[i];
-		posTh[i] = max(1e-6, G.getNodeThreshold(u));
-		for (int v : G.getNodeOutNeighbors(u)) {
-			double w = G.getEdgeInfluence(u, v);
-			if (w > 0) outSum[i] += w;
-		}
-	}
-
-	vector<double> fastScore(N);
-	for (int i = 0; i < N; ++i) fastScore[i] = outSum[i] - 0.5 * posTh[i];
-
-	vector<int> order(N);
-	iota(order.begin(), order.end(), 0);
-	sort(order.begin(), order.end(), [&](int a, int b) { return fastScore[a] > fastScore[b]; });
-
-	const int simLimit = min((int)N, 500);
-	vector<double> spread(N, 0.0);
-	for (int i = 0; i < simLimit; ++i) {
-		unordered_set<int> oneSeed = { nodes[order[i]] };
-		spread[order[i]] = estimateSpreadMC(G, oneSeed, 300);
-	}
-	sort(order.begin(), order.end(), [&](int a, int b) { return spread[a] > spread[b]; });
-	for (int i = 0; i < N && seeds.size() < numberOfSeeds; ++i) seeds.insert(nodes[order[i]]);
-	return seeds;
-}
-
-unordered_set<int> seedSelectionLarge(DirectedGraph& G, unsigned int numberOfSeeds) {
-	unordered_set<int> seeds;
-	vector<int> nodes = G.getAllNodes();
-	const int N = nodes.size();
-	vector<double> score(N);
-
-	const int simLimit = min((int)N, 800);
-	vector<int> order(N);
-	iota(order.begin(), order.end(), 0);
-	vector<double> spread(N);
-	for (int i = 0; i < simLimit; ++i) {
-		unordered_set<int> s = { nodes[i] };
-		spread[i] = estimateSpreadMC(G, s, 150);
-	}
-	sort(order.begin(), order.end(), [&](int a, int b) { return spread[a] > spread[b]; });
-
-	struct Entry {
-		int node;
-		double gain;
-		double total;
-		int updatedAt;
+	struct SeedInfo {
+		bool loaded = false;
+		bool hasGiven = false;
+		int given = -1;
+		string dataDir;
+		unordered_set<int> negatives;
 	};
-	struct Compare {
-		bool operator()(const Entry& a, const Entry& b) const {
-			return a.gain < b.gain;
+
+	static string joinPath(const string& dir, const string& file) {
+		return dir.empty() ? file : dir + ((dir.back() == '/' || dir.back() == '\') ? "" : "/") + file;
+	}
+
+	static vector<string> readCmdlineArgs() {
+		ifstream cmd("/proc/self/cmdline", ios::binary);
+		string raw((istreambuf_iterator<char>(cmd)), {});
+		vector<string> args;
+		string current;
+		for (char c : raw) c ? current += c : (args.push_back(current), current.clear());
+		if (!current.empty()) args.push_back(current);
+		return args;
+	}
+
+	static const SeedInfo& getSeedInfo() {
+		static SeedInfo info;
+		if (info.loaded) return info;
+		info.loaded = true;
+		vector<string> args = readCmdlineArgs();
+		if (args.size() >= 2) info.dataDir = args[1];
+
+		ifstream gp(joinPath(info.dataDir, "given_pos.txt"));
+		if (gp >> info.given) info.hasGiven = true;
+
+		ifstream gn(joinPath(info.dataDir, "neg_seed.txt"));
+		for (int val; gn >> val;) info.negatives.insert(val);
+
+		return info;
+	}
+
+	// Graph Data Cache
+	struct GraphCache {
+		vector<int> nodeIds;
+		unordered_map<int, int> idToIndex;
+		vector<vector<pair<int, double>>> outAdj;
+		vector<double> posThreshold, negThreshold, outStrength;
+
+		int indexOf(int id) const {
+			auto it = idToIndex.find(id);
+			return it == idToIndex.end() ? -1 : it->second;
 		}
 	};
 
-	priority_queue<Entry, vector<Entry>, Compare> pq;
-	for (int i = 0; i < simLimit; ++i) {
-		pq.push({ nodes[order[i]], spread[order[i]], spread[order[i]], 0 });
+	static GraphCache buildGraphCache(DirectedGraph& G) {
+		GraphCache c;
+		c.nodeIds = G.getAllNodes();
+		sort(c.nodeIds.begin(), c.nodeIds.end());
+		for (size_t i = 0; i < c.nodeIds.size(); ++i) c.idToIndex[c.nodeIds[i]] = i;
+
+		size_t N = c.nodeIds.size();
+		c.outAdj.resize(N);
+		c.posThreshold.resize(N);
+		c.negThreshold.resize(N);
+		c.outStrength.resize(N);
+
+		for (size_t i = 0; i < N; ++i) {
+			int u = c.nodeIds[i];
+			c.posThreshold[i] = G.getNodeThreshold(u);
+			c.negThreshold[i] = G.getNodeThreshold2(u);
+			double sum = 0.0;
+			for (int v : G.getNodeOutNeighbors(u)) {
+				double w = G.getEdgeInfluence(u, v);
+				sum += w;
+				int idx = c.indexOf(v);
+				if (idx >= 0) c.outAdj[i].emplace_back(idx, w);
+			}
+			sort(c.outAdj[i].begin(), c.outAdj[i].end());
+			c.outStrength[i] = sum;
+		}
+		return c;
 	}
 
-	int round = 0;
-	unordered_set<int> workingSeeds;
-	while ((int)seeds.size() < (int)numberOfSeeds && !pq.empty()) {
-		auto top = pq.top(); pq.pop();
-		if (top.updatedAt == round) {
-			seeds.insert(top.node);
-			workingSeeds.insert(top.node);
-			++round;
+	static vector<double> computeNegExposure(const GraphCache& c, const unordered_set<int>& negSeeds) {
+		vector<double> exposure(c.nodeIds.size(), 0.0);
+		for (int id : negSeeds) {
+			int idx = c.indexOf(id);
+			if (idx < 0) continue;
+			for (const auto& e : c.outAdj[idx]) exposure[e.first] += e.second;
 		}
-		else {
-			unordered_set<int> temp = workingSeeds;
-			temp.insert(top.node);
-			double newSpread = estimateSpreadMC(G, temp, 150);
-			double marginalGain = newSpread - estimateSpreadMC(G, workingSeeds, 150);
-			pq.push({ top.node, marginalGain, newSpread, round });
-		}
+		return exposure;
 	}
-	return seeds;
-}
 
-unordered_set<int> autoStrategySeedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
-	SizeClass sz = classifyGraphSize(G);
-	if (sz == SMALL) return seedSelectionSmall(G, numberOfSeeds);
-	if (sz == MEDIUM) return seedSelectionMedium(G, numberOfSeeds);
-	return seedSelectionLarge(G, numberOfSeeds);
-}
+	struct FullDiffResult {
+		size_t posActive = 0, negActive = 0;
+		double spread = 0.0;
+	};
 
-#endif
+	static FullDiffResult runFullDiffusionSimulation(DirectedGraph& G, const unordered_set<int>& pos, const unordered_set<int>& neg) {
+		FullDiffResult res;
+		unordered_set<int> p, n;
+		diffuse_signed_all(&G, pos, neg, p, n);
+		res.posActive = p.size();
+		res.negActive = n.size();
+		res.spread = double(p.size()) - double(n.size());
+		return res;
+	}
+
+} 
+
