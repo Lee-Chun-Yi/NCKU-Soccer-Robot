@@ -748,8 +748,10 @@ static bool isAnchorThreatened(
         visited.insert(hub);
 
         while (!q.empty()) {
-            auto [node, depth] = q.front();
+            auto current = q.front();
             q.pop();
+            int node = current.first;
+            int depth = current.second;
             if (depth >= hopLimit) continue;
             for (int nxt : G.getNodeOutNeighbors(node)) {
                 int nextDepth = depth + 1;
