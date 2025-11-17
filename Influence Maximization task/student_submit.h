@@ -11,8 +11,6 @@
 #include <cmath>
 #include <random>
 #include <limits>
-#include <iostream>
-#include <iomanip>
 #include <cstdlib>
 #include <tuple>
 
@@ -20,15 +18,6 @@
 #include "graph.h"
 
 using namespace std;
-
-static bool isSmallDebugEnabled() {
-    static int cached = -1;
-    if (cached == -1) {
-        const char *env = std::getenv("SMALL_DEBUG");
-        cached = (env && env[0] != '\0') ? 1 : 0;
-    }
-    return cached == 1;
-}
 
 static constexpr double TWO_HOP_WEIGHT = 0.4;
 static constexpr double NEG_PRESSURE_BONUS = 1.0;
@@ -1214,7 +1203,7 @@ unordered_set<int> seedSelection(
     ParameterSet bestParam = hillClimbSmallParameters(
         G, allNodes, numberOfSeeds, givenPosSeed, givenNeg, outWeight, approxScore, negPressure, baseParam);
 
-    const bool debugSmall = isSmallDebugEnabled();
+    const bool debugSmall = false;
     OffensiveDebugInfo offenseDebug;
     if (debugSmall) {
         offenseDebug.enabled = true;
@@ -1282,97 +1271,6 @@ unordered_set<int> seedSelection(
         }
     } else {
         fillFallbackSeeds(allNodes, givenNeg, givenPosSeed, numberOfSeeds, seeds, outWeight);
-    }
-
-    if (debugSmall) {
-        vector<int> finalSeeds(seeds.begin(), seeds.end());
-        sort(finalSeeds.begin(), finalSeeds.end());
-
-        unordered_set<int> posOut, negOut;
-        double finalScore = simulateSmallScore(G, seeds, givenPosSeed, givenNeg, &posOut, &negOut);
-
-        unordered_map<int,double> contribMap;
-        for (auto &p : offenseDebug.pickedContribution) contribMap[p.first] = p.second;
-
-        cout << "\n===== SMALL DEBUG REPORT =====\n";
-        cout << "[第5層] Graph summary: nodes=" << N
-             << ", edges=" << G.getEdgeNumber()
-             << ", avg out-degree=" << fixed << setprecision(2)
-             << (N ? static_cast<double>(G.getEdgeNumber()) / static_cast<double>(N) : 0.0)
-             << "\n";
-
-        if (!givenNeg.empty()) {
-            cout << "[第4層] NEG hub 壓力分布:\n";
-            for (int neg : givenNeg) {
-                auto outs = G.getNodeOutNeighbors(neg);
-                vector<pair<int,double>> neigh;
-                double total = 0.0;
-                for (int v : outs) {
-                    double w = G.getEdgeInfluence(neg, v);
-                    total += w;
-                    neigh.emplace_back(v, w);
-                }
-                sort(neigh.begin(), neigh.end(),
-                     [](const auto &a, const auto &b){return a.second > b.second;});
-                size_t show = min<size_t>(neigh.size(), 5);
-                cout << "  NEG " << neg << " deg=" << outs.size()
-                     << " totalOut=" << total << " ->";
-                for (size_t i = 0; i < show; ++i) {
-                    cout << " (" << neigh[i].first << "," << fixed << setprecision(3) << neigh[i].second << ")";
-                }
-                cout << "\n";
-            }
-        } else {
-            cout << "[第4層] NEG hub 壓力分布: 無負面種子\n";
-        }
-        if (!guardSeedsDebug.empty()) {
-            cout << "[Guard 層] 防守 seed:";
-            for (size_t i = 0; i < guardSeedsDebug.size(); ++i) {
-                cout << " " << guardSeedsDebug[i];
-            }
-            cout << "\n";
-        }
-
-        cout << "[第3層] Seed 預期貢獻 (真實 Δscore):\n";
-        for (int s : finalSeeds) {
-            double val = contribMap.count(s) ? contribMap[s] : 0.0;
-            char origin = seedSource.count(s) ? seedSource[s] : '-';
-            cout << "  seed " << s << " (" << origin << ") -> gain=" << fixed << setprecision(4) << val << "\n";
-        }
-
-        cout << "[第2層] diffuse_signed_all result: pos=" << posOut.size()
-             << ", neg=" << negOut.size()
-             << ", score=" << fixed << setprecision(4) << finalScore << "\n";
-
-        cout << "[第1層] 最終 small seeds (D=defense, G=guard, O=offense, F=fallback): ";
-        for (size_t i = 0; i < finalSeeds.size(); ++i) {
-            if (i) cout << ", ";
-            cout << finalSeeds[i];
-        }
-        cout << "\n";
-
-        cout << "最後 9 顆 small seeds: ";
-        for (size_t i = 0; i < finalSeeds.size(); ++i) {
-            if (i) cout << " ";
-            cout << finalSeeds[i];
-        }
-        cout << "\n";
-
-        cout << "Offense ranking (top 10, 真實 Δscore):";
-        if (offenseDebug.initialRanking.empty()) {
-            cout << " (none)\n";
-        } else {
-            cout << "\n";
-            for (auto &p : offenseDebug.initialRanking) {
-                cout << "  cand " << p.first << " gain~" << fixed << setprecision(4) << p.second << "\n";
-            }
-        }
-
-        cout << "diffuse_signed_all 終態: pos=" << posOut.size()
-             << " nodes, neg=" << negOut.size() << " nodes, score=" << fixed << setprecision(4) << finalScore << "\n";
-        cout.unsetf(std::ios::floatfield);
-        cout << setprecision(6);
-        cout << "================================\n\n";
     }
 
     return seeds;
