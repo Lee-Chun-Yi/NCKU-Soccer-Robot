@@ -113,6 +113,15 @@ static void computeOutStats(
     }
 }
 
+static double getOutWeightOrDefault(
+    const unordered_map<int,double> &outWeight,
+    int node,
+    double defaultValue = 0.0)
+{
+    auto it = outWeight.find(node);
+    return (it == outWeight.end()) ? defaultValue : it->second;
+}
+
 // =====================================================================================
 //  Approximate 2-hop spread score (CELF-Lite style)
 // =====================================================================================
@@ -145,7 +154,7 @@ static double simulateSmallScore(
     unordered_set<int> negInit = negSeeds;
 
     unordered_set<int> finalPos, finalNeg;
-    diffuse_signed_all(&G, std::move(posInit), std::move(negInit), finalPos, finalNeg);
+    diffuse_signed_all(&G, posInit, negInit, finalPos, finalNeg);
 
     const size_t totalNodes = G.getAllNodes().size();
     double score = 0.0;
@@ -444,7 +453,7 @@ static void chooseOffensiveSeeds(
         if (chosenSeeds.count(u)) continue;
         if (givenNegSeeds.count(u)) continue;
         if (u == givenPosSeed) continue;
-        if (outWeight.at(u) <= 0) continue;
+        if (getOutWeightOrDefault(outWeight, u) <= 0) continue;
         cand.push_back(u);
     }
 
@@ -1025,7 +1034,7 @@ static void fillFallbackSeeds(
         if (seeds.count(u)) continue;
         if (givenNeg.count(u)) continue;
         if (u == givenPosSeed) continue;
-        extra.emplace_back(u, outWeight.at(u));
+        extra.emplace_back(u, getOutWeightOrDefault(outWeight, u));
     }
     sort(extra.begin(), extra.end(), [](auto &a, auto &b){ return a.second > b.second; });
     for (auto &p : extra) {
