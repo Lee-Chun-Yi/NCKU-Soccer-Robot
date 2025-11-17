@@ -183,7 +183,8 @@ unordered_set<int> seedSelection(DirectedGraph&G,unsigned int K){
     if(N<=200){
         for(unsigned k=0;k<K;++k){ double best=-1e18; int bn=-1;
             for(size_t i=0;i<N;++i){int id=c.nodeIds[i]; if(banned.count(id)||cur.count(id))continue;
-                auto r=runSim(G,unordered_set<int>(cur.begin(),cur.end())|unordered_set<int>({id}),neg);
+                unordered_set<int> trial=cur; trial.insert(id);
+                auto r=runSim(G,trial,neg);
                 if(r.s>best){best=r.s;bn=id;} }
             if(bn<0)break;
             cur.insert(bn); S.insert(bn); curS=best;
