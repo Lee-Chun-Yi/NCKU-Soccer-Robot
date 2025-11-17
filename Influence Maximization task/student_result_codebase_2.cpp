@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include "graph.h"
 #include "LT.h"
+#include "student_submit.h"
 using namespace std;
 
 #define TOTAL_POS_SEEDS 10  // given_pos(1) + student select(9)
