@@ -159,7 +159,11 @@ static FullDiffResult runFullDiffusionSimulation(
 
 } // namespace student_algo_detail
 
-unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
+unordered_set<int> seedSelection(
+    DirectedGraph& G,
+    unsigned int numberOfSeeds,
+    int givenPosSeed = -1,
+    const unordered_set<int>& givenNegSeeds = unordered_set<int>()) {
     using namespace student_algo_detail;
 
     unordered_set<int> seeds;
@@ -168,10 +172,16 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
     const GraphCache c = buildGraphCache(G);
     const SeedInfo& info = getSeedInfo();
 
-    unordered_set<int> banned = info.negatives;
-    if (info.hasGiven) banned.insert(info.given);
+    unordered_set<int> negFromInfo = info.negatives;
+    negFromInfo.insert(givenNegSeeds.begin(), givenNegSeeds.end());
 
-    vector<double> negExp = computeNegExposure(c, info.negatives);
+    unordered_set<int> banned = info.negatives;
+    banned.insert(givenNegSeeds.begin(), givenNegSeeds.end());
+
+    int selectedGiven = info.hasGiven ? info.given : givenPosSeed;
+    if (selectedGiven >= 0) banned.insert(selectedGiven);
+
+    vector<double> negExp = computeNegExposure(c, negFromInfo);
 
     size_t N = c.nodeIds.size();
     vector<double> fastScore(N);
@@ -214,9 +224,9 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
         }
     }
 
-    unordered_set<int> negS = info.negatives;
+    unordered_set<int> negS = negFromInfo;
     unordered_set<int> cur;
-    if (info.hasGiven) cur.insert(info.given);
+    if (selectedGiven >= 0) cur.insert(selectedGiven);
 
     FullDiffResult base = runFullDiffusionSimulation(G, cur, negS);
     double curSpread = base.spread;
