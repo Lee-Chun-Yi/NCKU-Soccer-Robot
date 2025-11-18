@@ -179,16 +179,27 @@ static FullDiffResult runFullDiffusionSimulation(
  *
  * �A�u�ݭn�^�Ǥ@�� unordered_set<int>�A�̭��� numberOfSeeds 9��positivate seed�s���C
  */
-unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
-	using namespace student_algo_detail;
+unordered_set<int> seedSelection(DirectedGraph& G,
+        unsigned int numberOfSeeds,
+        int givenPosSeed,
+        const unordered_set<int>& givenNegSeeds) {
+        using namespace student_algo_detail;
 
 	unordered_set<int> seeds;
 	if (numberOfSeeds == 0 || G.getSize() == 0) {
 		return seeds;
 	}
 
-	const GraphCache cache = buildGraphCache(G);
-	const SeedInfo& info = getSeedInfo();
+        const GraphCache cache = buildGraphCache(G);
+        SeedInfo info = getSeedInfo();
+
+        if (givenPosSeed >= 0) {
+                info.hasGiven = true;
+                info.given = givenPosSeed;
+        }
+        if (!givenNegSeeds.empty()) {
+                info.negatives = givenNegSeeds;
+        }
 
 	unordered_set<int> banned = info.negatives;
 	if (info.hasGiven) banned.insert(info.given);
@@ -235,7 +246,7 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 		}
 	}
 
-	unordered_set<int> negSeedSet = info.negatives;
+        unordered_set<int> negSeedSet = info.negatives;
 	unordered_set<int> workingSeeds;
 	if (info.hasGiven) workingSeeds.insert(info.given);
 	FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
