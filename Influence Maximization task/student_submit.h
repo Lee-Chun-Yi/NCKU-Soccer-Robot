@@ -78,18 +78,18 @@ static const SeedInfo& getSeedInfo() {
 }
 
 struct GraphCache {
-	vector<int> nodeIds;
-	unordered_map<int, int> idToIndex;
-	vector<vector<pair<int, double>>> outAdj;
-	vector<double> posThreshold;
-	vector<double> negThreshold;
-	vector<double> outStrength;
+        vector<int> nodeIds;
+        unordered_map<int, int> idToIndex;
+        vector<vector<pair<int, double>>> outAdj;
+        vector<double> posThreshold;
+        vector<double> negThreshold;
+        vector<double> outStrength;
 
-	int indexOf(int nodeId) const {
-		auto it = idToIndex.find(nodeId);
-		if (it == idToIndex.end()) return -1;
-		return it->second;
-	}
+        int indexOf(int nodeId) const {
+                auto it = idToIndex.find(nodeId);
+                if (it == idToIndex.end()) return -1;
+                return it->second;
+        }
 };
 
 static GraphCache buildGraphCache(DirectedGraph& G) {
@@ -138,15 +138,52 @@ static GraphCache buildGraphCache(DirectedGraph& G) {
 }
 
 static vector<double> computeNegExposure(const GraphCache& cache, const unordered_set<int>& negSeeds) {
-	vector<double> exposure(cache.nodeIds.size(), 0.0);
-	if (cache.nodeIds.empty() || negSeeds.empty()) return exposure;
-	for (int id : negSeeds) {
-		int idx = cache.indexOf(id);
-		if (idx < 0) continue;
-		for (const auto& edge : cache.outAdj[idx])
-			exposure[edge.first] += edge.second;
-	}
-	return exposure;
+        vector<double> exposure(cache.nodeIds.size(), 0.0);
+        if (cache.nodeIds.empty() || negSeeds.empty()) return exposure;
+        for (int id : negSeeds) {
+                int idx = cache.indexOf(id);
+                if (idx < 0) continue;
+                for (const auto& edge : cache.outAdj[idx])
+                        exposure[edge.first] += edge.second;
+        }
+        return exposure;
+}
+
+static vector<double> computeTwoHopPotential(const GraphCache& cache) {
+        vector<double> potential(cache.nodeIds.size(), 0.0);
+        for (size_t idx = 0; idx < cache.outAdj.size(); ++idx) {
+                double agg = 0.0;
+                for (const auto& edge : cache.outAdj[idx]) {
+                        double neighborConnectivity = cache.outStrength[edge.first] + double(cache.outAdj[edge.first].size());
+                        agg += edge.second * neighborConnectivity;
+                }
+                potential[idx] = agg;
+        }
+        return potential;
+}
+
+static vector<double> computeVulnerabilityScores(const GraphCache& cache) {
+        vector<double> vulnerability(cache.nodeIds.size(), 0.0);
+        for (size_t idx = 0; idx < cache.nodeIds.size(); ++idx) {
+                double threshold = max(0.05, cache.posThreshold[idx]);
+                double ratio = cache.outStrength[idx] / threshold;
+                double negGuard = 1.0 / (1.0 + cache.negThreshold[idx]);
+                vulnerability[idx] = ratio * negGuard;
+        }
+        return vulnerability;
+}
+
+static vector<double> computeNegNeighborExposure(const GraphCache& cache, const vector<double>& negExposure) {
+        vector<double> neighborExposure(cache.nodeIds.size(), 0.0);
+        if (cache.nodeIds.empty()) return neighborExposure;
+        for (size_t idx = 0; idx < cache.outAdj.size(); ++idx) {
+                double base = negExposure[idx];
+                if (base <= 0.0) continue;
+                for (const auto& edge : cache.outAdj[idx]) {
+                        neighborExposure[edge.first] += base * edge.second;
+                }
+        }
+        return neighborExposure;
 }
 
 struct FullDiffResult {
@@ -179,7 +216,7 @@ static FullDiffResult runFullDiffusionSimulation(
  *
  * �A�u�ݭn�^�Ǥ@�� unordered_set<int>�A�̭��� numberOfSeeds 9��positivate seed�s���C
  */
-unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
+static unordered_set<int> selectSeedsCore(DirectedGraph& G, unsigned int numberOfSeeds, int givenPosSeed, const unordered_set<int>& negSeeds) {
 	using namespace student_algo_detail;
 
 	unordered_set<int> seeds;
@@ -188,22 +225,27 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 	}
 
 	const GraphCache cache = buildGraphCache(G);
-	const SeedInfo& info = getSeedInfo();
+	unordered_set<int> banned = negSeeds;
+	if (givenPosSeed >= 0) banned.insert(givenPosSeed);
 
-	unordered_set<int> banned = info.negatives;
-	if (info.hasGiven) banned.insert(info.given);
+        vector<double> negExposure = computeNegExposure(cache, negSeeds);
+        vector<double> negNeighborExposure = computeNegNeighborExposure(cache, negExposure);
+        vector<double> twoHopPotential = computeTwoHopPotential(cache);
+        vector<double> vulnerability = computeVulnerabilityScores(cache);
 
-	vector<double> negExposure = computeNegExposure(cache, info.negatives);
-
-	const size_t N = cache.nodeIds.size();
-	vector<double> fastScore(N, 0.0);
-	for (size_t idx = 0; idx < N; ++idx) {
-		double score = cache.outStrength[idx];
-		score += 0.05 * double(cache.outAdj[idx].size());
-		score -= 0.55 * cache.posThreshold[idx];
-		if (!negExposure.empty()) score -= 0.8 * negExposure[idx];
-		fastScore[idx] = score;
-	}
+        const size_t N = cache.nodeIds.size();
+        vector<double> fastScore(N, 0.0);
+        for (size_t idx = 0; idx < N; ++idx) {
+                double score = cache.outStrength[idx];
+                score += 0.04 * double(cache.outAdj[idx].size());
+                score += 0.03 * twoHopPotential[idx];
+                score += 0.15 * vulnerability[idx];
+                score -= 0.45 * cache.posThreshold[idx];
+                score -= 0.1 * cache.negThreshold[idx];
+                score -= 0.6 * negExposure[idx];
+                score -= 0.25 * negNeighborExposure[idx];
+                fastScore[idx] = score;
+        }
 
 	vector<int> order;
 	order.reserve(N);
@@ -235,9 +277,9 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 		}
 	}
 
-	unordered_set<int> negSeedSet = info.negatives;
+	const unordered_set<int>& negSeedSet = negSeeds;
 	unordered_set<int> workingSeeds;
-	if (info.hasGiven) workingSeeds.insert(info.given);
+	if (givenPosSeed >= 0) workingSeeds.insert(givenPosSeed);
 	FullDiffResult baseResult = runFullDiffusionSimulation(G, workingSeeds, negSeedSet);
 	double currentSpread = baseResult.spread;
 	int iteration = 0;
@@ -294,5 +336,16 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 
 	return seeds;
 }
+unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
+	using namespace student_algo_detail;
+	const SeedInfo& info = getSeedInfo();
+	int given = info.hasGiven ? info.given : -1;
+	return selectSeedsCore(G, numberOfSeeds, given, info.negatives);
+}
+
+unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds, int givenPosSeed, const unordered_set<int>& givenNegSeeds) {
+	return selectSeedsCore(G, numberOfSeeds, givenPosSeed, givenNegSeeds);
+}
+
 
 #endif
