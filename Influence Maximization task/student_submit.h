@@ -200,8 +200,8 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 	for (size_t idx = 0; idx < N; ++idx) {
 		double score = cache.outStrength[idx];
 		score += 0.05 * double(cache.outAdj[idx].size());
-		score -= 0.55 * cache.posThreshold[idx];
-		if (!negExposure.empty()) score -= 0.8 * negExposure[idx];
+                score -= 0.45 * cache.posThreshold[idx];
+                if (!negExposure.empty()) score -= 0.55 * negExposure[idx];
 		fastScore[idx] = score;
 	}
 
@@ -214,7 +214,7 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds) {
 	});
 
 	const int MIN_SIM = 400;
-	const int MULTIPLIER = 60;
+        const int MULTIPLIER = 90;
 	int simulateCount = static_cast<int>(order.size());
 	int targetSim = max(MIN_SIM, MULTIPLIER * static_cast<int>(numberOfSeeds));
 	if (simulateCount > targetSim) simulateCount = targetSim;
