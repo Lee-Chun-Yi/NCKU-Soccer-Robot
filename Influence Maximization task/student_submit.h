@@ -63,29 +63,34 @@ unordered_set<int> seedSelection(DirectedGraph& G, unsigned int numberOfSeeds,
     vector<double> pos_coverage(N, 0.0);
     vector<double> neg_coverage(N, 0.0);
 
+    // Select heuristic parameters based on graph size
     double LAMBDA, PHI, GAMMA, DELTA, ETA;
-
+    
     if (N <= 200) {
-        LAMBDA = 2.1;
-        PHI = 0.5;
-        GAMMA = 0.1;
-        DELTA = 0.02;
-        ETA = 0.35;
+        // Small graphs (≈100 nodes): emphasize spread, reduce over-penalty
+        LAMBDA = 2.0;
+        PHI    = 0.55;
+        GAMMA  = 0.05;
+        DELTA  = 0.01;
+        ETA    = 0.35;
     }
     else if (N <= 2000) {
+        // Medium graphs (≈1k nodes): balanced and stable baseline
         LAMBDA = 1.8;
-        PHI = 1.0;
-        GAMMA = 0.1;
-        DELTA = 0.03;
-        ETA = 0.35;
+        PHI    = 1.0;
+        GAMMA  = 0.1;
+        DELTA  = 0.03;
+        ETA    = 0.25;
     }
     else {
-        LAMBDA = 1.5;
-        PHI = 1.4;
-        GAMMA = 0.1;
-        DELTA = 0.045;
-        ETA = 0.45;
+        // Large graphs (≈10k nodes): avoid over-penalizing central nodes
+        LAMBDA = 1.8;
+        PHI    = 0.8;
+        GAMMA  = 0.1;
+        DELTA  = 0.03;
+        ETA    = 0.30;
     }
+
 
     auto marginal_gain = [&](int u) -> double {
         if (seeds.count(u) || forbidden.count(u)) return -numeric_limits<double>::infinity();
