@@ -255,7 +255,7 @@ def strategy():
 
 def keeper_movement(player_id):
     player_p = oriplayer_p[player_id]
-    plater_d = oriplayer_d[player_id]
+    player_d = oriplayer_d[player_id]
     enemy = [0, 0]
 
     distwithkeeper = 9999999
@@ -546,7 +546,7 @@ def robot_boundary(player_id,goal):
     global long,width
     global kick_dir
     player_p = oriplayer_p[player_id]
-    player_d = oriplayer_p[player_id]
+    player_d = oriplayer_d[player_id]
     origin = [0, 0] #機器人原點座標
     # print("newpst", origin)
     anglex = -_angleforpoint(oriplayer_p[1], goal)  # 需要的角度是逆時針的，所以加個負號

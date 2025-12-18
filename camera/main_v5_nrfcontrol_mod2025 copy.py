@@ -68,7 +68,7 @@ import challenge3_forward as st_3_1
 
 # import imageprocess_v4 as imageprocess
 # import image_processing as imageprocess
-import image_processing_Androsot_no_skin as imageprocess
+import imageprocess_complete1 as imageprocess
 import threading
 import time
 import tkinter as tk
@@ -496,7 +496,22 @@ def return_sent_cmd3_2(send_data, sent):
 #         pass
 
 def imagedetection():
-    imageprocess.imagedetection(fieldchoose)
+    """
+    Launch vision pipeline with manual 4-point calibration.
+    - First try imageprocess.main() (shows CV windows for clicking 4 corners).
+    - Fallback to legacy imagedetection if main() is unavailable.
+    """
+    try:
+        # reset corner lists so you can click 4 points
+        if hasattr(imageprocess, "points_cam0"):
+            imageprocess.points_cam0 = []
+        if hasattr(imageprocess, "points_cam2"):
+            imageprocess.points_cam2 = []
+        # run the full pipeline with UI (blocks until closed)
+        imageprocess.main()
+    except AttributeError:
+        # fallback to original stub if main() not present
+        imageprocess.imagedetection(fieldchoose)
 
 
 def HSVdetection():
