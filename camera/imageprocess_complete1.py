@@ -4,6 +4,7 @@ import math
 import threading
 import time
 from typing import Tuple, Optional
+import sys
 
 
 # ==========================================
@@ -586,11 +587,22 @@ def mouse_callback_cam2(event, x, y, flags, param):
 # [主程式]
 # ==========================================
 def _open_camera(cam_id):
-    """Try DirectShow first; fallback to default backend."""
-    cap = cv2.VideoCapture(cam_id, cv2.CAP_DSHOW)
-    if not cap.isOpened():
+    """Open camera with a sensible backend per OS, fallback to default."""
+    backends = []
+    if sys.platform.startswith("win"):
+        backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, 0]
+    elif sys.platform.startswith("linux"):
+        backends = [cv2.CAP_V4L2, 0]
+    else:
+        backends = [0]
+
+    cap = None
+    for backend in backends:
+        cap = cv2.VideoCapture(cam_id, backend) if backend != 0 else cv2.VideoCapture(cam_id)
+        if cap.isOpened():
+            break
         cap.release()
-        cap = cv2.VideoCapture(cam_id)
+        cap = None
     return cap
 
 
