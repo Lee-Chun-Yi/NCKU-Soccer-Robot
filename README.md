@@ -1,107 +1,105 @@
-# 0114 第一次成功踢到球 — 專案說明
+# 0114 First Successful Kick — Project Overview
 
-本專案已整理為模組化結構。以下內容以 **專案根目錄**（`...\0114`）為基準說明，主要執行入口為 `src/main.py`。
+This project has been reorganized into a modular structure. The descriptions below assume the **project root** (`...\0114`). The main entry point is `src/main.py`.
 
 ---
 
-## 一、專案結構（最新版）
+## 1. Project Structure (Current)
 
-- `src/`：主程式與模組
-  - `main.py`：GUI 主入口（影像偵測、NRF、Monitor / Simulator）。
+- `src/`: main program and modules
+  - `main.py`: GUI entry (vision, NRF, Monitor / Simulator).
   - `vision/`
-    - `imageprocess.py`：影像處理與定位（球、機器人、角度）。
-    - `vision_ui.py`：影像校正 / HSV / ColorMask UI。
+    - `imageprocess.py`: vision processing and localization (ball, robots, angles).
+    - `vision_ui.py`: UI for calibration / HSV / ColorMask.
   - `strategies/`
-    - `challenge3_forward.py`：進攻策略（Challenge3）。
-    - `challenge3_keeper_final_v2.py`：防守策略（Challenge3）。
+    - `challenge3_forward.py`: attack strategy (Challenge3).
+    - `challenge3_keeper_final_v2.py`: defense strategy (Challenge3).
     - `ui/`
-      - `challenge_ui.py`：Challenge UI + 執行邏輯（含送指令與顯示）。
-      - `strategy_ui.py`：策略選擇 UI。
+      - `challenge_ui.py`: Challenge UI + execution logic (including sending commands and logs).
+      - `strategy_ui.py`: strategy selection UI.
   - `simulator/`
-    - `simulator.py`：即時模擬器（主程式按鈕呼叫）。
-    - `simulator_test.py`：**可獨立執行的完整模擬器**（目前設為 Challenge3 策略）。
-    - `simulator_appearance.py`、`vec_cal_func.py`：模擬器外觀與向量計算。
+    - `simulator.py`: realtime simulator (opened from main UI).
+    - `simulator_test.py`: **standalone full simulator** (currently uses Challenge3 strategy).
+    - `simulator_appearance.py`, `vec_cal_func.py`: appearance + vector math.
   - `nrf/`
-    - `nrf_controller.py`：NRF 通訊。
-    - `nrf_ui.py`：NRF UI（搜尋、送指令、狀態）。
+    - `nrf_controller.py`: NRF communication.
+    - `nrf_ui.py`: NRF UI (scan ports, send commands, status).
   - `recording/`
-    - `data_record.py`：資料記錄。
-    - `recording_ui.py`：記錄 UI。
+    - `data_record.py`: data recording logic.
+    - `recording_ui.py`: recording UI.
   - `config/`
-    - `constants.py`：場地常數（`FIELD/BOUNDARY/CENTER`）與資料目錄。
-    - 校正 / 模型 / 設定：
-      - `calibration_*`, `color_settings*.json`, `strategy.txt`, `pi.pstates`...
-    - 子資料夾：
-      - `calibration/`：`calib_cam*.npz`、`calibration_matrix_*`、`distortion_coefficients_*`、`field*.txt`、`points*.npy`、`HSV*.txt`
-      - `images/`：校正/測試影像
-      - `models/`：模型/權重（`*.pth`, `*.pkl`）
-- `camera_test/`：攝影機與校正測試工具（主程式未直接調用）
+    - `constants.py`: field constants (`FIELD/BOUNDARY/CENTER`) and data paths.
+    - calibration / models / settings:
+      - `calibration_*`, `color_settings*.json`, `strategy.txt`, `pi.pstates`, etc.
+    - subfolders:
+      - `calibration/`: `calib_cam*.npz`, `calibration_matrix_*`, `distortion_coefficients_*`, `field*.txt`, `points*.npy`, `HSV*.txt`
+      - `images/`: calibration / test images
+      - `models/`: model weights (`*.pth`, `*.pkl`)
+- `camera_test/`: camera/calibration test scripts (not used directly by main program)
 
 ---
 
-## 二、執行方式
+## 2. How to Run
 
-### 1) 主程式（GUI）
+### 2.1 Main GUI
 
-在專案根目錄執行：
+From project root:
 
 ```
 python src/main.py
 ```
 
-GUI 功能：
-- **影像偵測**：啟動影像處理與校正流程
-- **Monitor**：簡化版模擬視窗（無 dist/ang/向量箭頭）
-- **Simulator**：完整模擬視窗（含 overlay）
-- **挑戰**：Challenge3 的策略選擇與執行
-- **NRF**：搜尋序列埠 / 送固定指令
+GUI functions:
+- **Vision Detection**: start vision processing and calibration
+- **Monitor**: simplified simulator view (no dist/ang/vector overlay)
+- **Simulator**: full simulator view (with overlay)
+- **Challenge**: Challenge3 strategy selection and run
+- **NRF**: scan serial ports / send fixed command
 
-### 2) 模擬器（獨立）
+### 2.2 Standalone Simulator
 
 ```
 python src/simulator/simulator_test.py
 ```
 
-說明：
-- 不依賴 `main.py` GUI。
-- 使用 `strategies/challenge3_forward.py` 作為策略來源。
-- 右鍵設定 **機器人位置**。
+Notes:
+- Does not depend on `main.py` GUI.
+- Uses `strategies/challenge3_forward.py` as the strategy module.
+- Right-click sets **robot position**.
 
 ---
 
-## 三、指令送出頻率（重點整理）
+## 3. Command Output Rate (Important)
 
-### 1) `main.py`
-**不限制**機器人指令輸出頻率。  
-僅透過 UI 呼叫 `nrf_ui.send_cmd_safe(...)`，沒有節流/限速。
+### 3.1 `main.py`
+No command rate limiting. It only calls `nrf_ui.send_cmd_safe(...)` from UI events.
 
-### 2) `nrf_ui.py`
-**不限制**指令頻率，只負責送出。
+### 3.2 `nrf_ui.py`
+No rate limiting; it just sends commands.
 
-### 3) `challenge_ui.py`
-Challenge3 執行緒內有 **固定間隔**：
+### 3.3 `challenge_ui.py`
+Challenge3 worker thread includes:
 
 ```
 time.sleep(3)
 ```
 
-所以 Challenge3 模式下 **約每 3 秒**送一次指令。
+So in Challenge3 mode, commands are sent roughly **once every 3 seconds**.
 
 ---
 
-## 四、常見設定檔位置
+## 4. Common Config Locations
 
-- 校正點 / HSV：`src/config/calibration_points.json`, `src/config/calibration_hsv.json`
-- 校正資料：`src/config/calibration/`
-- 模型檔：`src/config/models/`
+- Calibration points / HSV: `src/config/calibration_points.json`, `src/config/calibration_hsv.json`
+- Calibration data: `src/config/calibration/`
+- Models: `src/config/models/`
 
 ---
 
-## 五、備註
+## 5. Notes
 
-- 若要變更策略，主要設定在：
-  - `strategies/challenge3_forward.py`（進攻）
-  - `strategies/challenge3_keeper_final_v2.py`（防守）
-- 若要更改場地邊界或中心點，請修改：
+- Strategy files:
+  - `strategies/challenge3_forward.py` (attack)
+  - `strategies/challenge3_keeper_final_v2.py` (defense)
+- Field boundary / center:
   - `src/config/constants.py`
-
