@@ -1,7 +1,6 @@
-# 0114 First Successful Kick — Project Overview
+# NCKU-Soccer-Robot 
 
-This project has been reorganized into a modular structure. The descriptions below assume the **project root** (`...\0114`). The main entry point is `src/main.py`.
-
+This is a GUI interface for robotic soccer kicking and defensive behaviors. The NCKU-Soccer-Robot project is an integrated system that combines ArUco marker–based and ball visual recognition and localization, NRF-based command transmission to the robot, and the implementation of kicking and defensive strategies.
 ---
 
 ## 1. Project Structure (Current)
