@@ -1,56 +1,47 @@
-# 1. NCKU-Soccer-Robot — GUI-Based Robotic Soccer System
+# 0114 First Successful Kick — Project Overview
 
-This project presents a GUI-based robotic soccer system for **kicking and defensive behaviors**.
-The system integrates **ArUco marker–based robot localization**, **ball visual detection**, **NRF-based command transmission**, and **soccer strategy execution**, enabling real-time perception, decision-making, and actuation within a unified interface.
-
-## Relative folder:
-
-* [Main GUI entry](./src/main.py) → GUI entry point integrating vision, NRF communication, and monitor/simulator modules
-
-* [Vision system](./src/vision) → Visual perception and localization
-
-  * [imageprocess.py](./src/vision/imageprocess.py) → Ball and robot detection, angle estimation, and localization
-  * [vision_ui.py](./src/vision/vision_ui.py) → Calibration UI (HSV tuning and color masking)
-
-* [Strategy module](./src/strategies) → Kicking and defensive strategies
-
-  * [challenge3_forward.py](./src/strategies/challenge3_forward.py) → Attack strategy (Challenge 3)
-  * [challenge3_keeper_final_v2.py](./src/strategies/challenge3_keeper_final_v2.py) → Defense strategy (Challenge 3)
-  * [Challenge UI](./src/strategies/ui/challenge_ui.py) → Strategy execution UI, command dispatch, and logging
-  * [Strategy selection UI](./src/strategies/ui/strategy_ui.py) → Strategy selection interface
-
-* [Simulator](./src/simulator) → Real-time visualization and simulation
-
-  * [simulator.py](./src/simulator/simulator.py) → Simulator launched from the main GUI
-  * [simulator_test.py](./src/simulator/simulator_test.py) → Standalone full simulator (Challenge 3)
-  * [simulator_appearance.py](./src/simulator/simulator_appearance.py) → Visualization settings
-  * [vec_cal_func.py](./src/simulator/vec_cal_func.py) → Vector and geometry calculations
-
-* [NRF communication](./src/nrf) → Wireless command transmission
-
-  * [nrf_controller.py](./src/nrf/nrf_controller.py) → NRF communication logic
-  * [nrf_ui.py](./src/nrf/nrf_ui.py) → NRF UI (port scanning, command sending, status)
-
-* [Data recording](./src/recording) → Runtime data logging
-
-  * [data_record.py](./src/recording/data_record.py) → Data recording logic
-  * [recording_ui.py](./src/recording/recording_ui.py) → Recording control UI
-
-* [Configuration](./src/config) → Field, calibration, and model configuration
-
-  * [constants.py](./src/config/constants.py) → Field constants (FIELD / BOUNDARY / CENTER) and data paths
-  * [Calibration data](./src/config/calibration) → Camera calibration matrices, distortion coefficients, field geometry
-  * [Images](./src/config/images) → Calibration and testing images
-  * [Models](./src/config/models) → Model weights (`*.pth`, `*.pkl`)
-  * Calibration and settings files → HSV, color masks, strategy settings, robot states
-
-* [Camera test scripts](./camera_test) → Camera and calibration test utilities (not used in main program)
+This project has been reorganized into a modular structure. The descriptions below assume the **project root** (`...\0114`). The main entry point is `src/main.py`.
 
 ---
 
-## How to Run
+## 1. Project Structure (Current)
 
-### Main GUI
+- `src/`: main program and modules
+  - `main.py`: GUI entry (vision, NRF, Monitor / Simulator).
+  - `vision/`
+    - `imageprocess.py`: vision processing and localization (ball, robots, angles).
+    - `vision_ui.py`: UI for calibration / HSV / ColorMask.
+  - `strategies/`
+    - `challenge3_forward.py`: attack strategy (Challenge3).
+    - `challenge3_keeper_final_v2.py`: defense strategy (Challenge3).
+    - `ui/`
+      - `challenge_ui.py`: Challenge UI + execution logic (including sending commands and logs).
+      - `strategy_ui.py`: strategy selection UI.
+  - `simulator/`
+    - `simulator.py`: realtime simulator (opened from main UI).
+    - `simulator_test.py`: **standalone full simulator** (currently uses Challenge3 strategy).
+    - `simulator_appearance.py`, `vec_cal_func.py`: appearance + vector math.
+  - `nrf/`
+    - `nrf_controller.py`: NRF communication.
+    - `nrf_ui.py`: NRF UI (scan ports, send commands, status).
+  - `recording/`
+    - `data_record.py`: data recording logic.
+    - `recording_ui.py`: recording UI.
+  - `config/`
+    - `constants.py`: field constants (`FIELD/BOUNDARY/CENTER`) and data paths.
+    - calibration / models / settings:
+      - `calibration_*`, `color_settings*.json`, `strategy.txt`, `pi.pstates`, etc.
+    - subfolders:
+      - `calibration/`: `calib_cam*.npz`, `calibration_matrix_*`, `distortion_coefficients_*`, `field*.txt`, `points*.npy`, `HSV*.txt`
+      - `images/`: calibration / test images
+      - `models/`: model weights (`*.pth`, `*.pkl`)
+- `camera_test/`: camera/calibration test scripts (not used directly by main program)
+
+---
+
+## 2. How to Run
+
+### 2.1 Main GUI
 
 From project root:
 
@@ -58,43 +49,57 @@ From project root:
 python src/main.py
 ```
 
-Main GUI functions:
+GUI functions:
+- **Vision Detection**: start vision processing and calibration
+- **Monitor**: simplified simulator view (no dist/ang/vector overlay)
+- **Simulator**: full simulator view (with overlay)
+- **Challenge**: Challenge3 strategy selection and run
+- **NRF**: scan serial ports / send fixed command
 
-* Vision Detection → Start visual detection and calibration
-* Monitor → Simplified simulator view
-* Simulator → Full simulator with overlays
-* Challenge → Challenge 3 strategy selection and execution
-* NRF → Serial port scanning and command transmission
-
----
-
-### Standalone Simulator
+### 2.2 Standalone Simulator
 
 ```
 python src/simulator/simulator_test.py
 ```
 
 Notes:
-
-* Does not depend on the main GUI
-* Uses `challenge3_forward.py` as the strategy module
-* Right-click interaction sets robot position
-
----
-
-### Command Output Rate
-
-* `main.py` → No command rate limiting; commands are triggered by UI events
-* `nrf_ui.py` → Direct command transmission without rate limiting
-* `challenge_ui.py` → Worker thread includes `time.sleep(3)`, resulting in command output approximately **once every 3 seconds** in Challenge 3 mode
+- Does not depend on `main.py` GUI.
+- Uses `strategies/challenge3_forward.py` as the strategy module.
+- Right-click sets **robot position**.
 
 ---
 
-### Common Configuration Locations
+## 3. Command Output Rate (Important)
 
-* Calibration points and HSV settings → `src/config/`
-* Camera calibration data → `src/config/calibration/`
-* Model weights → `src/config/models/`
-* Field boundary and center definitions → `src/config/constants.py`
+### 3.1 `main.py`
+No command rate limiting. It only calls `nrf_ui.send_cmd_safe(...)` from UI events.
 
+### 3.2 `nrf_ui.py`
+No rate limiting; it just sends commands.
 
+### 3.3 `challenge_ui.py`
+Challenge3 worker thread includes:
+
+```
+time.sleep(3)
+```
+
+So in Challenge3 mode, commands are sent roughly **once every 3 seconds**.
+
+---
+
+## 4. Common Config Locations
+
+- Calibration points / HSV: `src/config/calibration_points.json`, `src/config/calibration_hsv.json`
+- Calibration data: `src/config/calibration/`
+- Models: `src/config/models/`
+
+---
+
+## 5. Notes
+
+- Strategy files:
+  - `strategies/challenge3_forward.py` (attack)
+  - `strategies/challenge3_keeper_final_v2.py` (defense)
+- Field boundary / center:
+  - `src/config/constants.py`

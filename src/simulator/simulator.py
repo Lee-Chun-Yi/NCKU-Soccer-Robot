@@ -31,7 +31,7 @@ def _load_main_module():
     class Dummy:
         # Default field if no main module is loaded (standalone simulator)
         BOUNDARY = [
-            (0, 0), (360, 0), (360, 70), (375, 70), (375, 290), (360, 190),
+            (0, 0), (360, 0), (360, 70), (375, 70), (375, 190), (360, 190),
             (360, 260), (0, 260), (0, 190), (-15, 190), (-15, 70), (0, 70),
         ]
         CENTER = [180, 130]

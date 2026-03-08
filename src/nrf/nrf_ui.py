@@ -1,5 +1,6 @@
 import tkinter as tk
 from tkinter import messagebox
+import threading
 
 try:
     from nrf import nrf_controller as controller
@@ -20,6 +21,31 @@ controller_port_info = None
 controller_status_var = None
 _nrf_cfg_loaded = False
 _controller_cfg_loaded = False
+_popup_parent = None
+
+
+def _show_popup(kind: str, title: str, text: str):
+    def _do_show():
+        try:
+            fn = getattr(messagebox, kind, None)
+            if callable(fn):
+                fn(title, text)
+            else:
+                messagebox.showerror(title, text)
+        except Exception as err:
+            print(f"[NRF][popup:{kind}] {title}: {text} | err={err}")
+
+    target = _popup_parent if _popup_parent is not None else tk._default_root
+    if threading.current_thread() is threading.main_thread():
+        _do_show()
+        return
+    if target is not None:
+        try:
+            target.after(0, _do_show)
+            return
+        except Exception:
+            pass
+    _do_show()
 
 
 def _set_controller_status(text):
@@ -39,7 +65,7 @@ def _ensure_nrf_config():
         return True
     except Exception as err:
         try:
-            messagebox.showerror("NRF 設定錯誤", str(err))
+            _show_popup("showerror", "NRF 設定錯誤", str(err))
         except Exception:
             print(f"NRF 設定錯誤: {err}")
         return False
@@ -55,7 +81,7 @@ def _ensure_controller_config():
         return True
     except Exception as err:
         try:
-            messagebox.showerror("NRF 設定錯誤", str(err))
+            _show_popup("showerror", "NRF 設定錯誤", str(err))
         except Exception:
             print(f"NRF 設定錯誤: {err}")
         return False
@@ -109,7 +135,7 @@ def scan_serial_ports(parent_window=None):
 
     ports = nrf_scan.get_device()
     if not ports:
-        messagebox.showwarning("NRF", "找不到任何序列埠，請確認設備已連接")
+        _show_popup("showwarning", "NRF", "找不到任何序列埠，請確認設備已連接")
         return
 
     usable = []
@@ -126,7 +152,7 @@ def scan_serial_ports(parent_window=None):
                 device.close()
 
     if not usable:
-        messagebox.showwarning("NRF", "沒有可使用的序列埠")
+        _show_popup("showwarning", "NRF", "沒有可使用的序列埠")
         return
 
     selector = tk.Toplevel(parent_window) if parent_window is not None else tk.Toplevel()
@@ -157,7 +183,7 @@ def scan_serial_ports(parent_window=None):
             if _ensure_controller_config():
                 controller.download_cfg(controller_device)
         except Exception as err:
-            messagebox.showwarning("NRF", f"下載設定失敗: {err}")
+            _show_popup("showwarning", "NRF", f"下載設定失敗: {err}")
 
         selector.destroy()
 
@@ -179,11 +205,11 @@ def send_cmd_safe(move_data, device=None, context="", allow_popup=True):
     dev = device or get_controller_device()
     if dev is None:
         if allow_popup:
-            messagebox.showerror("NRF", "無法連線到 NRF 裝置，請先執行搜尋序列埠")
+            _show_popup("showerror", "NRF", "無法連線到 NRF 裝置，請先執行搜尋序列埠")
         print(f"[NRF][{context}] no device")
         return False
     if not isinstance(move_data, (list, tuple)) or len(move_data) < 3:
-        messagebox.showerror("NRF", f"{context or '指令'} 格式錯誤，需三個字串")
+        _show_popup("showerror", "NRF", f"{context or '指令'} 格式錯誤，需三個字串")
         print(f"[NRF][{context}] invalid move_data: {move_data}")
         return False
     try:
@@ -191,13 +217,14 @@ def send_cmd_safe(move_data, device=None, context="", allow_popup=True):
         controller.main_procedure(dev, move_data)
         return True
     except Exception as err:
-        messagebox.showerror("NRF", f"{context or '送出指令'}失敗: {err}")
+        _show_popup("showerror", "NRF", f"{context or '送出指令'}失敗: {err}")
         print(f"[NRF][{context}] send error: {err}")
         return False
 
 
 def build_nrf_ui(frame, parent_window=None):
-    global controller_status_var
+    global controller_status_var, _popup_parent
+    _popup_parent = parent_window
     controller_status_var = tk.StringVar(value="NRF: 未連線")
     nrf_status_label = tk.Label(
         frame,

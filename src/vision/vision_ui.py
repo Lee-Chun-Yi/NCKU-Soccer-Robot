@@ -68,8 +68,9 @@ def imagedetection():
     if _imageprocess is None:
         return
 
-    def start_default():
-        popup.destroy()
+    def start_default(popup_obj=None):
+        if popup_obj is not None:
+            popup_obj.destroy()
         try:
             default_path = _resource_path("calibration_points.json")
             hsv_path = _resource_path("calibration_hsv.json")
@@ -128,8 +129,9 @@ def imagedetection():
         except AttributeError:
             _imageprocess.imagedetection(fieldchoose)
 
-    def start_manual():
-        popup.destroy()
+    def start_manual(popup_obj=None):
+        if popup_obj is not None:
+            popup_obj.destroy()
         try:
             if hasattr(_imageprocess, "points_cam0"):
                 _imageprocess.points_cam0.clear()
@@ -142,13 +144,71 @@ def imagedetection():
         except AttributeError:
             _imageprocess.imagedetection(fieldchoose)
 
+    def start_background(popup_obj):
+        popup_obj.destroy()
+        try:
+            if hasattr(_imageprocess, "start_image_thread"):
+                _imageprocess.start_image_thread(show_windows=False)
+            elif hasattr(_imageprocess, "image_result"):
+                _imageprocess.image_result()
+            else:
+                print("[imagedetection] background mode not supported by current backend")
+        except Exception as err:
+            print(f"[imagedetection] switch to background failed: {err}")
+
+    def restart_detection(popup_obj):
+        popup_obj.destroy()
+        try:
+            if hasattr(_imageprocess, "start_image_thread"):
+                _imageprocess.start_image_thread(show_windows=True)
+            else:
+                _imageprocess.main()
+        except Exception as err:
+            print(f"[imagedetection] restart failed: {err}")
+
+    def stop_detection(popup_obj):
+        popup_obj.destroy()
+        try:
+            if hasattr(_imageprocess, "stop_image_thread"):
+                _imageprocess.stop_image_thread()
+            elif hasattr(_imageprocess, "_running"):
+                _imageprocess._running = False
+        except Exception as err:
+            print(f"[imagedetection] stop failed: {err}")
+
+    if getattr(_imageprocess, "_running", False):
+        running_popup = tk.Toplevel(_parent_window) if _parent_window is not None else tk.Toplevel()
+        running_popup.title("影像辨識執行中")
+        tk.Label(running_popup, text="影像辨識已啟動，請選擇操作").pack(pady=8, padx=12)
+        btn_frame = tk.Frame(running_popup)
+        btn_frame.pack(pady=6)
+        tk.Button(
+            btn_frame,
+            text="背景執行",
+            width=10,
+            command=lambda: start_background(running_popup),
+        ).pack(side="left", padx=4)
+        tk.Button(
+            btn_frame,
+            text="重新啟動",
+            width=10,
+            command=lambda: restart_detection(running_popup),
+        ).pack(side="left", padx=4)
+        tk.Button(
+            btn_frame,
+            text="關閉",
+            width=10,
+            command=lambda: stop_detection(running_popup),
+        ).pack(side="left", padx=4)
+        return
+
     popup = tk.Toplevel(_parent_window) if _parent_window is not None else tk.Toplevel()
     popup.title("影像辨識選擇")
     tk.Label(popup, text="選擇校正方式").pack(pady=8, padx=12)
     btn_frame = tk.Frame(popup)
     btn_frame.pack(pady=6)
-    tk.Button(btn_frame, text="預設", width=10, command=start_default).pack(side="left", padx=6)
-    tk.Button(btn_frame, text="手動校正", width=10, command=start_manual).pack(side="left", padx=6)
+    tk.Button(btn_frame, text="預設", width=10, command=lambda: start_default(popup)).pack(side="left", padx=6)
+    tk.Button(btn_frame, text="手動校正", width=10, command=lambda: start_manual(popup)).pack(side="left", padx=6)
 
 
 def HSVdetection():

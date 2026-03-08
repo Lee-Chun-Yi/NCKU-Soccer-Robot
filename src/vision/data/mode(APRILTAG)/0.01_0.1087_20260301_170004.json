@@ -1,0 +1,36 @@
+{
+  "saved_at": "2026-03-01 17:00:04",
+  "source": "apriltag_calibration",
+  "method": "APRILTAG",
+  "params": {
+    "cornerRefinementWinSize": 26,
+    "cornerRefinementMaxIterations": 145,
+    "cornerRefinementMinAccuracy": 0.122,
+    "adaptiveThreshWinSizeMin": 7,
+    "adaptiveThreshWinSizeMax": 43,
+    "adaptiveThreshWinSizeStep": 14,
+    "adaptiveThreshConstant": 4.0,
+    "minMarkerPerimeterRate": 0.438,
+    "maxMarkerPerimeterRate": 3.24,
+    "minCornerDistanceRate": 0.499,
+    "minOtsuStdDev": 11.59,
+    "perspectiveRemoveIgnoredMarginPerCell": 0.415,
+    "errorCorrectionRate": 0.137,
+    "cornerRefinementMethodName": "APRILTAG",
+    "cornerRefinementMethod": 3
+  },
+  "metrics": {
+    "avg_detect_sec": 0.012975837032879807,
+    "avg_jitter": 0.10868406467158763,
+    "coverage": 1.0,
+    "neutral_score": -8.178186348517718,
+    "apriltag_objective": 8.178186348517718,
+    "avg_count": 3.0,
+    "stability": 1.0,
+    "min_perimeter_px": 197.30223846435547,
+    "small_bonus": 0.15205098651437646,
+    "detect_errors": 0,
+    "valid": true
+  },
+  "candidate_count": 24
+}

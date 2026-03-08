@@ -702,7 +702,22 @@ class Robot():
 # ==========================================
 # [獨立工具函數] - 機器人追蹤處理管線
 # ==========================================
-def process_robot_pipeline(frame, detector, mtx, dist, target_ids, cam_role, robots_dict, config_cam1, config_cam2, marker_size, pre_undist=None):
+def process_robot_pipeline(
+    frame,
+    detector,
+    mtx,
+    dist,
+    target_ids,
+    cam_role,
+    robots_dict,
+    config_cam1,
+    config_cam2,
+    marker_size,
+    pre_undist=None,
+    filter_non_robot_aruco=True,
+    cam_extrinsics=None,
+    K_rot=None,
+):
     """
     處理機器人追蹤的完整流程
     """
@@ -758,7 +773,8 @@ def process_robot_pipeline(frame, detector, mtx, dist, target_ids, cam_role, rob
     if ids is not None:
         for i, mid in enumerate(ids.flatten()):
             raw_fX = raw_fY = None  # default for logging when no coord
-            if mid not in target_ids: continue
+            if filter_non_robot_aruco and mid not in target_ids:
+                continue
             
             success, rvec, tvec = cv2.solvePnP(obj_pts, corners[i], mtx, dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
             # 固定 z 為正值，避免因高度為負造成姿態 180 度翻轉；同時固定 rvec.z 避免跳動
@@ -792,6 +808,22 @@ def process_robot_pipeline(frame, detector, mtx, dist, target_ids, cam_role, rob
                     rvec_top, _ = cv2.Rodrigues(R_top)
                     mapped_fX, mapped_fY = _map_tvec_to_field(tvec_top, cam_role, config_cam1, config_cam2, mid)
                 fX, fY = mapped_fX, mapped_fY
+                
+                # 射線投影座標計算（如果相機外參可用）
+                ray_fX, ray_fY = None, None
+                if cam_extrinsics is not None and K_rot is not None:
+                    aruco_center = corners[i][0].mean(axis=0)
+                    rpx, rpy = _rotate_pixel_to_rotated_frame(
+                        aruco_center[0], aruco_center[1], cam_role,
+                        frame_h=frame.shape[0], frame_w=frame.shape[1],
+                    )
+                    R_ext, cam_pos = cam_extrinsics
+                    h_robot_cfg = config_cam1['robot_height'] if cam_role == "Cam1" else config_cam2['robot_height']
+                    ray_fX, ray_fY = _ray_cast_to_height(
+                        rpx, rpy, K_rot, R_ext, cam_pos, h_robot_cfg * 100.0,
+                    )
+                    if ray_fX is not None:
+                        fX, fY = ray_fX, ray_fY # 註解掉退回舊方法
                 
                 # 角度：直接用對齊後的 R_top 提取前方向，避免依賴 tvec 造成的視差
                 raw_angle = _compute_angle_from_R(R_top)
@@ -952,8 +984,11 @@ def process_robot_pipeline(frame, detector, mtx, dist, target_ids, cam_role, rob
                     (f"Y:{mapped_fY:.1f}" if mapped_fY is not None else "Y:N/A", (0,255,255) if mapped_fY is not None else (0,0,255)),
                 ]
                 if raw_fX is not None and raw_fY is not None:
-                    info_block.append((f"RawX:{raw_fX:.1f}", (255,200,0)))
-                    info_block.append((f"RawY:{raw_fY:.1f}", (255,200,0)))
+                    info_block.append((f"OldX:{raw_fX:.1f}", (255,200,0)))
+                    info_block.append((f"OldY:{raw_fY:.1f}", (255,200,0)))
+                if ray_fX is not None and ray_fY is not None:
+                    info_block.append((f"RayX:{ray_fX:.1f}", (0,255,128)))
+                    info_block.append((f"RayY:{ray_fY:.1f}", (0,255,128)))
                 info_lines_left.append(info_block)
                 
                 cv2.drawFrameAxes(frame_undist, mtx, dist, rvec, tvec, 0.03)
@@ -1183,6 +1218,102 @@ def _map_tvec_to_field(tvec, cam_role, config_cam1, config_cam2, marker_id):
     return Xb, Yb
 
 
+# ==========================================
+# [射線投影座標校正] — 取代多項式擬合
+# ==========================================
+FIELD_CORNERS_3D = np.array([
+    [0.0,        0.0,         0.0],
+    [REAL_WIDTH, 0.0,         0.0],
+    [REAL_WIDTH, REAL_HEIGHT, 0.0],
+    [0.0,        REAL_HEIGHT, 0.0],
+], dtype=np.float64)
+
+
+def _compute_new_camera_matrix(mtx, dist, w, h):
+    """Compute optimal new camera matrix for undistorted image."""
+    new_mtx, _ = cv2.getOptimalNewCameraMatrix(mtx, dist, (w, h), 1, (w, h))
+    return new_mtx
+
+
+def _compute_k_rotated(new_mtx, rotation, orig_h, orig_w):
+    """Compute camera matrix for a 90-degree rotated image.
+
+    rotation: 'cw' for ROTATE_90_CLOCKWISE (Cam0),
+              'ccw' for ROTATE_90_COUNTERCLOCKWISE (Cam2)
+    orig_h, orig_w: dimensions of the pre-rotation image
+    """
+    K = np.array(new_mtx, dtype=np.float64)
+    if rotation == "cw":
+        T = np.array([[0, -1, orig_h - 1],
+                      [1,  0, 0],
+                      [0,  0, 1]], dtype=np.float64)
+    elif rotation == "ccw":
+        T = np.array([[0,  1, 0],
+                      [-1, 0, orig_w - 1],
+                      [0,  0, 1]], dtype=np.float64)
+    else:
+        return K.copy()
+    return T @ K
+
+
+def _compute_camera_extrinsics(corner_pixels_sorted, K_rot):
+    """Compute camera extrinsics from 4 sorted field corner pixels.
+
+    corner_pixels_sorted: 4 points in rotated undistorted image,
+        sorted by sort_points() [TL, TR, BR, BL] corresponding to
+        field corners [(0,0), (W,0), (W,H), (0,H)].
+    K_rot: camera matrix for rotated undistorted image.
+
+    Returns (R, cam_pos_world) or None if failed.
+    """
+    img_pts = np.array(corner_pixels_sorted, dtype=np.float64).reshape(-1, 1, 2)
+    K = np.array(K_rot, dtype=np.float64)
+    success, rvec, tvec = cv2.solvePnP(
+        FIELD_CORNERS_3D, img_pts, K, np.zeros(5, dtype=np.float64),
+        flags=cv2.SOLVEPNP_ITERATIVE,
+    )
+    if not success:
+        print("[ray_cast] solvePnP on field corners failed")
+        return None
+    R, _ = cv2.Rodrigues(rvec)
+    cam_pos = -R.T @ tvec
+    print(f"[ray_cast] Camera pos (cm): X={cam_pos[0,0]:.1f} Y={cam_pos[1,0]:.1f} Z={cam_pos[2,0]:.1f}")
+    return R, cam_pos
+
+
+def _ray_cast_to_height(px, py, K_rot, R, cam_pos, height_cm):
+    """Cast a ray from camera through pixel (px, py) in rotated image,
+    intersect with plane z = height_cm.
+
+    Returns (field_x_cm, field_y_cm) or (None, None).
+    """
+    K_inv = np.linalg.inv(np.array(K_rot, dtype=np.float64))
+    pt_h = np.array([px, py, 1.0], dtype=np.float64)
+    ray_cam = K_inv @ pt_h
+    ray_world = R.T @ ray_cam
+    cam_z = cam_pos[2, 0]
+    ray_z = ray_world[2]
+    if abs(ray_z) < 1e-10:
+        return None, None
+    t = (height_cm - cam_z) / ray_z
+    if t < 0:
+        return None, None
+    point = cam_pos.flatten() + t * ray_world
+    return float(point[0]), float(point[1])
+
+
+def _rotate_pixel_to_rotated_frame(x, y, cam_role, frame_h=480, frame_w=640):
+    """Transform pixel from undistorted un-rotated frame to rotated frame.
+
+    Cam1: ROTATE_90_CLOCKWISE        → (x,y) → (H-1-y, x)
+    Cam2: ROTATE_90_COUNTERCLOCKWISE → (x,y) → (y, W-1-x)
+    """
+    if cam_role == "Cam1":
+        return float(frame_h - 1 - y), float(x)
+    else:
+        return float(y), float(frame_w - 1 - x)
+
+
 def _angular_diff(a, b):
     """Return smallest signed diff between angles in degrees."""
     return ((a - b + 180.0) % 360.0) - 180.0
@@ -1289,6 +1420,74 @@ fused_for_mask = None
 _pending_hsv_sample = None
 # 顯示模式：full -> 全部視窗; compact -> 只顯示 Robot Track & Fused
 DISPLAY_MODE = "full"
+
+# Robot ID / ArUco filtering runtime options
+DEFAULT_ROBOT_ID_GROUPS = [
+    [0, 6, 2, 8, 4],
+    [10, 16, 12, 18, 14],
+    [20, 26, 22, 28, 24],
+]
+_robot_id_groups = [ids.copy() for ids in DEFAULT_ROBOT_ID_GROUPS]
+FILTER_NON_ROBOT_ARUCO = True
+_tracking_cfg_lock = threading.Lock()
+
+
+def _normalize_robot_id_groups(groups):
+    if not isinstance(groups, (list, tuple)) or len(groups) != 3:
+        raise ValueError("robot_id_groups 必須是長度 3 的 list/tuple")
+    normalized = []
+    for idx, group in enumerate(groups):
+        if not isinstance(group, (list, tuple)):
+            raise ValueError(f"Robot{idx} 的 ID 必須是 list/tuple")
+        ids = []
+        for raw in group:
+            try:
+                aid = int(raw)
+            except Exception as err:
+                raise ValueError(f"Robot{idx} 含有無法轉成整數的 ID: {raw}") from err
+            if aid < 0:
+                raise ValueError(f"Robot{idx} 含有負值 ID: {aid}")
+            ids.append(aid)
+        if not ids:
+            raise ValueError(f"Robot{idx} 至少要有 1 個 ArUco ID")
+        normalized.append(ids)
+
+    flat = [aid for group in normalized for aid in group]
+    dup = sorted({aid for aid in flat if flat.count(aid) > 1})
+    if dup:
+        raise ValueError(f"不同 Robot 的 ID 不可重複: {dup}")
+    return normalized
+
+
+def get_robot_tracking_options():
+    """Return current robot-id groups and filtering option for UI settings."""
+    with _tracking_cfg_lock:
+        return {
+            "robot_id_groups": [ids.copy() for ids in _robot_id_groups],
+            "filter_non_robot_aruco": bool(FILTER_NON_ROBOT_ARUCO),
+        }
+
+
+def set_robot_tracking_options(robot_id_groups=None, filter_non_robot_aruco=None):
+    """
+    Update runtime tracking options.
+    Note: options are applied on next image thread start/restart.
+    """
+    global _robot_id_groups, FILTER_NON_ROBOT_ARUCO
+    with _tracking_cfg_lock:
+        if robot_id_groups is not None:
+            _robot_id_groups = _normalize_robot_id_groups(robot_id_groups)
+        if filter_non_robot_aruco is not None:
+            FILTER_NON_ROBOT_ARUCO = bool(filter_non_robot_aruco)
+
+
+def _build_robots_from_runtime_options():
+    with _tracking_cfg_lock:
+        id_groups = [ids.copy() for ids in _robot_id_groups]
+    robots = []
+    for rid, ids in enumerate(id_groups):
+        robots.append(Robot(rid, ids, [0.0] * len(ids), [0.0] * len(ids), [0.0] * len(ids), "right"))
+    return robots
 
 
 # ==========================================
@@ -1408,12 +1607,8 @@ def main():
     # ==========================================
     # 1. 建立機器人實例
     # ==========================================
-    # 每台機器人各有五個 ArUco ID（上/前/左/後/右），最後被看到的面會覆寫主狀態
-    robot_0 = Robot(0, [0, 2, 6, 8, 4],  [0.0]*5, [0.0]*5, [0.0]*5, "right")
-    robot_1 = Robot(1, [10, 16, 12, 18, 14], [0.0]*5, [0.0]*5, [0.0]*5, "right")
-    robot_2 = Robot(2, [20, 26, 22, 28, 24], [0.0]*5, [0.0]*5, [0.0]*5, "right")
-    
-    robots = [robot_0, robot_1, robot_2]
+    robots = _build_robots_from_runtime_options()
+    robot_0 = robots[0]
     
     print("機器人追蹤系統:")
     for robot in robots:
@@ -1431,12 +1626,19 @@ def main():
             robots_dict[aruco_id] = robot
     
     print(f"追蹤目標 ID: {target_ids}")
+    with _tracking_cfg_lock:
+        filter_non_robot_aruco = bool(FILTER_NON_ROBOT_ARUCO)
+    print(f"過濾非 Robot ID ArUco: {filter_non_robot_aruco}")
     
     # ==========================================
     # 2. 載入相機校正參數 (共用)
     # ==========================================
     mtx_cam0, dist_cam0 = load_calibration_params('calib_cam0.npz')
     mtx_cam2, dist_cam2 = load_calibration_params('calib_cam2.npz')
+    new_mtx_cam0 = _compute_new_camera_matrix(mtx_cam0, dist_cam0, 640, 480)
+    new_mtx_cam2 = _compute_new_camera_matrix(mtx_cam2, dist_cam2, 640, 480)
+    K_rot_cam0 = _compute_k_rotated(new_mtx_cam0, "cw", 480, 640)
+    K_rot_cam2 = _compute_k_rotated(new_mtx_cam2, "ccw", 480, 640)
     
     # 使用第一個機器人的 ArUco 偵測器
     detector = robot_0.detector
@@ -1502,6 +1704,10 @@ def main():
     warp_m2 = None
     warp_pts0 = None
     warp_pts2 = None
+    cam0_extrinsics = None
+    cam2_extrinsics = None
+    cam0_ext_pts = None
+    cam2_ext_pts = None
 
 
     try:
@@ -1540,13 +1746,29 @@ def main():
             # ==========================================
             # 7. 機器人追蹤 (ArUco) - 使用獨立函數
             # ==========================================
+            # Update camera extrinsics for ray-cast
+            if len(points_cam0) == 4 and (cam0_ext_pts is None or not _points_equal(cam0_ext_pts, points_cam0)):
+                cam0_extrinsics = _compute_camera_extrinsics(sort_points(points_cam0), K_rot_cam0)
+                cam0_ext_pts = [list(pt) for pt in points_cam0]
+            if len(points_cam2) == 4 and (cam2_ext_pts is None or not _points_equal(cam2_ext_pts, points_cam2)):
+                cam2_extrinsics = _compute_camera_extrinsics(sort_points(points_cam2), K_rot_cam2)
+                cam2_ext_pts = [list(pt) for pt in points_cam2]
+
             robot_res0 = process_robot_pipeline(
                 frame0, detector, mtx_cam0, dist_cam0, target_ids, "Cam1", 
-                robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE, pre_undist=frame0_undist
+                robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE,
+                pre_undist=frame0_undist,
+                filter_non_robot_aruco=filter_non_robot_aruco,
+                cam_extrinsics=cam0_extrinsics,
+                K_rot=K_rot_cam0,
             )
             robot_res2 = process_robot_pipeline(
                 frame2, detector, mtx_cam2, dist_cam2, target_ids, "Cam2", 
-                robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE, pre_undist=frame2_undist
+                robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE,
+                pre_undist=frame2_undist,
+                filter_non_robot_aruco=filter_non_robot_aruco,
+                cam_extrinsics=cam2_extrinsics,
+                K_rot=K_rot_cam2,
             )
             
             if robot_res0 is not None:
@@ -1658,6 +1880,7 @@ ball_center = []
 _state_lock = threading.Lock()
 _worker = None
 _running = False
+_last_show_windows = False
 
 
 def _update_shared_state(robots):
@@ -1700,17 +1923,21 @@ def _default_corners_from_frame(frame):
 
 def _processing_loop(show_windows=False):
     global _running, fused_preview, robot_cam0_preview, robot_cam2_preview, fused_for_mask
-    # Robot setup (same IDs as original complete1.py) 上 前 左 後 右
-    robot_0 = Robot(0, [0, 6, 2, 8, 4],  [0.0]*5, [0.0]*5, [0.0]*5, "right")
-    robot_1 = Robot(1, [10, 16, 12, 18, 14], [0.0]*5, [0.0]*5, [0.0]*5, "right")
-    robot_2 = Robot(2, [20, 26, 22, 28, 24], [0.0]*5, [0.0]*5, [0.0]*5, "right")
-    robots = [robot_0, robot_1, robot_2]
+    robots = _build_robots_from_runtime_options()
+    robot_0 = robots[0]
 
     target_ids = [rid for r in robots for rid in r.aruco_id_list]
     robots_dict = {rid: r for r in robots for rid in r.aruco_id_list}
+    with _tracking_cfg_lock:
+        filter_non_robot_aruco = bool(FILTER_NON_ROBOT_ARUCO)
 
     mtx_cam0, dist_cam0 = load_calibration_params('calib_cam0.npz')
     mtx_cam2, dist_cam2 = load_calibration_params('calib_cam2.npz')
+    # Compute rotated camera matrices for ray-cast coordinate mapping
+    new_mtx_cam0 = _compute_new_camera_matrix(mtx_cam0, dist_cam0, 640, 480)
+    new_mtx_cam2 = _compute_new_camera_matrix(mtx_cam2, dist_cam2, 640, 480)
+    K_rot_cam0 = _compute_k_rotated(new_mtx_cam0, "cw", 480, 640)
+    K_rot_cam2 = _compute_k_rotated(new_mtx_cam2, "ccw", 480, 640)
     detector = robot_0.detector
 
     cap0 = open_camera_device(robot_0.CAM1_ID)
@@ -1769,6 +1996,10 @@ def _processing_loop(show_windows=False):
     warp_m2 = None
     warp_pts0 = None
     warp_pts2 = None
+    cam0_extrinsics = None
+    cam2_extrinsics = None
+    cam0_ext_pts = None
+    cam2_ext_pts = None
 
     try:
         while _running:
@@ -1819,15 +2050,31 @@ def _processing_loop(show_windows=False):
                 time.sleep(0.01)
                 continue
 
+            # Update camera extrinsics for ray-cast (when corner points available)
+            if len(points_cam0) == 4 and (cam0_ext_pts is None or not _points_equal(cam0_ext_pts, points_cam0)):
+                cam0_extrinsics = _compute_camera_extrinsics(sort_points(points_cam0), K_rot_cam0)
+                cam0_ext_pts = [list(pt) for pt in points_cam0]
+            if len(points_cam2) == 4 and (cam2_ext_pts is None or not _points_equal(cam2_ext_pts, points_cam2)):
+                cam2_extrinsics = _compute_camera_extrinsics(sort_points(points_cam2), K_rot_cam2)
+                cam2_ext_pts = [list(pt) for pt in points_cam2]
+
             # Robot tracking (no UI drawing unless show_windows)
             try:
                 robot_res0 = process_robot_pipeline(
                     frame0, detector, mtx_cam0, dist_cam0, target_ids, "Cam1",
-                    robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE, pre_undist=frame0_undist
+                    robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE,
+                    pre_undist=frame0_undist,
+                    filter_non_robot_aruco=filter_non_robot_aruco,
+                    cam_extrinsics=cam0_extrinsics,
+                    K_rot=K_rot_cam0,
                 )
                 robot_res2 = process_robot_pipeline(
                     frame2, detector, mtx_cam2, dist_cam2, target_ids, "Cam2",
-                    robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE, pre_undist=frame2_undist
+                    robots_dict, robot_0.CONFIG_CAM1, robot_0.CONFIG_CAM2, robot_0.MARKER_SIZE,
+                    pre_undist=frame2_undist,
+                    filter_non_robot_aruco=filter_non_robot_aruco,
+                    cam_extrinsics=cam2_extrinsics,
+                    K_rot=K_rot_cam2,
                 )
             except Exception as err:
                 print(f"[imageprocess_complete1] robot pipeline error: {err}")
@@ -1974,7 +2221,8 @@ def _processing_loop(show_windows=False):
 
 def start_image_thread(show_windows=False):
     """Start background vision thread (non-blocking)."""
-    global _worker, _running
+    global _worker, _running, _last_show_windows
+    _last_show_windows = bool(show_windows)
     if _worker and _worker.is_alive():
         _running = False
         _worker.join(timeout=1.0)
@@ -1991,6 +2239,14 @@ def stop_image_thread():
     if _worker and _worker.is_alive():
         _worker.join(timeout=1.0)
     _worker = None
+
+
+def get_runtime_state():
+    """Return current running state and latest display mode used by start_image_thread."""
+    return {
+        "running": bool(_running),
+        "show_windows": bool(_last_show_windows),
+    }
 
 
 def select_ball_color_at_canvas(x, y, canvas_w, canvas_h):
@@ -2055,6 +2311,29 @@ def select_ball_reference_rect(x0, y0, x1, y1, canvas_w, canvas_h):
     global fused_for_mask
     if fused_for_mask is None:
         return False
+    h, w = fused_for_mask.shape[:2]
+    fx0 = int(x0 / max(canvas_w, 1) * w)
+    fy0 = int(y0 / max(canvas_h, 1) * h)
+    fx1 = int(x1 / max(canvas_w, 1) * w)
+    fy1 = int(y1 / max(canvas_h, 1) * h)
+    fx0, fx1 = sorted((max(0, min(w - 1, fx0)), max(0, min(w - 1, fx1))))
+    fy0, fy1 = sorted((max(0, min(h - 1, fy0)), max(0, min(h - 1, fy1))))
+    if fx1 - fx0 < 2 or fy1 - fy0 < 2:
+        return False
+    try:
+        region = fused_for_mask[fy0:fy1, fx0:fx1]
+        hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+        avg_hsv = hsv_region.reshape(-1, 3).mean(axis=0).astype(int)
+        lower = np.array([max(avg_hsv[0]-40,0), max(avg_hsv[1]-100,0), max(avg_hsv[2]-100,0)])
+        upper = np.array([min(avg_hsv[0]+40,179), min(avg_hsv[1]+100,255), min(avg_hsv[2]+100,255)])
+        my_ball.hsv_range = (lower, upper)
+        my_ball.reference_template = region.copy()
+        my_ball.reference_point = (int((fx0+fx1)/2), int((fy0+fy1)/2))
+        _save_default_hsv(my_ball.hsv_range)
+        return True
+    except Exception as err:
+        print(f"[select_ball_reference_rect] error: {err}")
+        return False
 
 
 def select_ball_reference_polygon(points, canvas_w, canvas_h):
@@ -2095,29 +2374,6 @@ def select_ball_reference_polygon(points, canvas_w, canvas_h):
     my_ball.reference_point = (int(pts_np[:,0].mean()), int(pts_np[:,1].mean()))
     _save_default_hsv(my_ball.hsv_range)
     return True
-    h, w = fused_for_mask.shape[:2]
-    fx0 = int(x0 / max(canvas_w, 1) * w)
-    fy0 = int(y0 / max(canvas_h, 1) * h)
-    fx1 = int(x1 / max(canvas_w, 1) * w)
-    fy1 = int(y1 / max(canvas_h, 1) * h)
-    fx0, fx1 = sorted((max(0, min(w - 1, fx0)), max(0, min(w - 1, fx1))))
-    fy0, fy1 = sorted((max(0, min(h - 1, fy0)), max(0, min(h - 1, fy1))))
-    if fx1 - fx0 < 2 or fy1 - fy0 < 2:
-        return False
-    try:
-        region = fused_for_mask[fy0:fy1, fx0:fx1]
-        hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-        avg_hsv = hsv_region.reshape(-1, 3).mean(axis=0).astype(int)
-        lower = np.array([max(avg_hsv[0]-40,0), max(avg_hsv[1]-100,0), max(avg_hsv[2]-100,0)])
-        upper = np.array([min(avg_hsv[0]+40,179), min(avg_hsv[1]+100,255), min(avg_hsv[2]+100,255)])
-        my_ball.hsv_range = (lower, upper)
-        my_ball.reference_template = region.copy()
-        my_ball.reference_point = (int((fx0+fx1)/2), int((fy0+fy1)/2))
-        _save_default_hsv(my_ball.hsv_range)
-        return True
-    except Exception as err:
-        print(f"[select_ball_reference_rect] error: {err}")
-        return False
 
 
 # main_v5_nrfcontrol_mod2025 copy.py expects this name

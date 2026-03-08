@@ -1,0 +1,56 @@
+{
+  "saved_at": "2026-03-02 11:25:50",
+  "methods": {
+    "NONE": {
+      "cornerRefinementWinSize": 47,
+      "cornerRefinementMaxIterations": 92,
+      "cornerRefinementMinAccuracy": 0.114,
+      "adaptiveThreshWinSizeMin": 59,
+      "adaptiveThreshWinSizeMax": 61,
+      "adaptiveThreshWinSizeStep": 25,
+      "adaptiveThreshConstant": -49.0,
+      "minMarkerPerimeterRate": 0.428,
+      "maxMarkerPerimeterRate": 6.09,
+      "minCornerDistanceRate": 0.068,
+      "minOtsuStdDev": 4.02,
+      "perspectiveRemoveIgnoredMarginPerCell": 0.35,
+      "errorCorrectionRate": 0.245,
+      "cornerRefinementMethodName": "NONE",
+      "cornerRefinementMethod": 0
+    },
+    "SUBPIX": {
+      "cornerRefinementWinSize": 40,
+      "cornerRefinementMaxIterations": 22,
+      "cornerRefinementMinAccuracy": 0.258,
+      "adaptiveThreshWinSizeMin": 97,
+      "adaptiveThreshWinSizeMax": 99,
+      "adaptiveThreshWinSizeStep": 7,
+      "adaptiveThreshConstant": -16.0,
+      "minMarkerPerimeterRate": 0.105,
+      "maxMarkerPerimeterRate": 9.15,
+      "minCornerDistanceRate": 0.008,
+      "minOtsuStdDev": 0.55,
+      "perspectiveRemoveIgnoredMarginPerCell": 0.125,
+      "errorCorrectionRate": 0.115,
+      "cornerRefinementMethodName": "SUBPIX",
+      "cornerRefinementMethod": 1
+    },
+    "CONTOUR": {
+      "cornerRefinementWinSize": 40,
+      "cornerRefinementMaxIterations": 22,
+      "cornerRefinementMinAccuracy": 0.258,
+      "adaptiveThreshWinSizeMin": 97,
+      "adaptiveThreshWinSizeMax": 99,
+      "adaptiveThreshWinSizeStep": 7,
+      "adaptiveThreshConstant": -16.0,
+      "minMarkerPerimeterRate": 0.105,
+      "maxMarkerPerimeterRate": 9.15,
+      "minCornerDistanceRate": 0.008,
+      "minOtsuStdDev": 0.55,
+      "perspectiveRemoveIgnoredMarginPerCell": 0.125,
+      "errorCorrectionRate": 0.115,
+      "cornerRefinementMethodName": "CONTOUR",
+      "cornerRefinementMethod": 2
+    }
+  }
+}
