@@ -1,0 +1,180 @@
+{
+  "aruco_auto_apply_ms": 120,
+  "aruco_param_specs": [
+    {
+      "key": "cornerRefinementMethod",
+      "label": "cornerRefinementMethod",
+      "slider_min": 0,
+      "slider_max": 3,
+      "factor": 1,
+      "kind": "int"
+    },
+    {
+      "key": "cornerRefinementWinSize",
+      "label": "cornerRefinementWinSize",
+      "slider_min": 1,
+      "slider_max": 31,
+      "factor": 1,
+      "kind": "int"
+    },
+    {
+      "key": "cornerRefinementMaxIterations",
+      "label": "cornerRefinementMaxIterations",
+      "slider_min": 1,
+      "slider_max": 200,
+      "factor": 1,
+      "kind": "int"
+    },
+    {
+      "key": "cornerRefinementMinAccuracy",
+      "label": "cornerRefinementMinAccuracy",
+      "slider_min": 1,
+      "slider_max": 1000,
+      "factor": 10000,
+      "kind": "float"
+    },
+    {
+      "key": "adaptiveThreshWinSizeMin",
+      "label": "adaptiveThreshWinSizeMin",
+      "slider_min": 3,
+      "slider_max": 151,
+      "factor": 1,
+      "kind": "int"
+    },
+    {
+      "key": "adaptiveThreshWinSizeMax",
+      "label": "adaptiveThreshWinSizeMax",
+      "slider_min": 3,
+      "slider_max": 201,
+      "factor": 1,
+      "kind": "int"
+    },
+    {
+      "key": "adaptiveThreshWinSizeStep",
+      "label": "adaptiveThreshWinSizeStep",
+      "slider_min": 1,
+      "slider_max": 51,
+      "factor": 1,
+      "kind": "int"
+    },
+    {
+      "key": "adaptiveThreshConstant",
+      "label": "adaptiveThreshConstant",
+      "slider_min": -300,
+      "slider_max": 300,
+      "factor": 10,
+      "kind": "float"
+    },
+    {
+      "key": "minMarkerPerimeterRate",
+      "label": "minMarkerPerimeterRate",
+      "slider_min": 1,
+      "slider_max": 50000,
+      "factor": 1000000,
+      "kind": "float"
+    },
+    {
+      "key": "maxMarkerPerimeterRate",
+      "label": "maxMarkerPerimeterRate",
+      "slider_min": 100,
+      "slider_max": 2000,
+      "factor": 100,
+      "kind": "float"
+    },
+    {
+      "key": "minCornerDistanceRate",
+      "label": "minCornerDistanceRate",
+      "slider_min": 1,
+      "slider_max": 50000,
+      "factor": 1000000,
+      "kind": "float"
+    },
+    {
+      "key": "minMarkerDistanceRate",
+      "label": "minMarkerDistanceRate",
+      "slider_min": 1,
+      "slider_max": 50000,
+      "factor": 1000000,
+      "kind": "float"
+    },
+    {
+      "key": "minDistanceToBorder",
+      "label": "minDistanceToBorder",
+      "slider_min": 0,
+      "slider_max": 100,
+      "factor": 1,
+      "kind": "int"
+    },
+    {
+      "key": "minOtsuStdDev",
+      "label": "minOtsuStdDev",
+      "slider_min": 0,
+      "slider_max": 500,
+      "factor": 10,
+      "kind": "float"
+    },
+    {
+      "key": "perspectiveRemoveIgnoredMarginPerCell",
+      "label": "perspectiveRemoveIgnoredMarginPerCell",
+      "slider_min": 0,
+      "slider_max": 1000,
+      "factor": 1000,
+      "kind": "float"
+    },
+    {
+      "key": "errorCorrectionRate",
+      "label": "errorCorrectionRate",
+      "slider_min": 0,
+      "slider_max": 1000,
+      "factor": 1000,
+      "kind": "float"
+    },
+    {
+      "key": "detectInvertedMarker",
+      "label": "detectInvertedMarker",
+      "slider_min": 0,
+      "slider_max": 1,
+      "factor": 1,
+      "kind": "bool"
+    }
+  ],
+  "capture_resolution_options": [
+    [
+      640,
+      480
+    ],
+    [
+      960,
+      540
+    ],
+    [
+      1280,
+      720
+    ],
+    [
+      1600,
+      900
+    ],
+    [
+      1920,
+      1080
+    ]
+  ],
+  "strong_capture_preset": {
+    "width": 1280,
+    "height": 720,
+    "fps": 30,
+    "auto_exposure": false,
+    "exposure": -7.0,
+    "auto_focus": false,
+    "focus": 120.0,
+    "gain": 8.0,
+    "brightness": -1.0,
+    "upscale_factors": [
+      1.4,
+      1.8,
+      2.2,
+      2.6
+    ]
+  }
+}

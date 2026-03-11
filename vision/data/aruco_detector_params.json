@@ -1,0 +1,19 @@
+{
+  "cornerRefinementMethod": 0,
+  "cornerRefinementWinSize": 30,
+  "cornerRefinementMaxIterations": 6,
+  "cornerRefinementMinAccuracy": 0.01,
+  "adaptiveThreshWinSizeMin": 9,
+  "adaptiveThreshWinSizeMax": 111,
+  "adaptiveThreshWinSizeStep": 9,
+  "adaptiveThreshConstant": 10.5,
+  "minMarkerPerimeterRate": 0.041612,
+  "maxMarkerPerimeterRate": 3.29,
+  "minCornerDistanceRate": 0.013551,
+  "minMarkerDistanceRate": 0.048034,
+  "minDistanceToBorder": 88,
+  "minOtsuStdDev": 21.4,
+  "perspectiveRemoveIgnoredMarginPerCell": 0.494,
+  "errorCorrectionRate": 0.309,
+  "detectInvertedMarker": false
+}

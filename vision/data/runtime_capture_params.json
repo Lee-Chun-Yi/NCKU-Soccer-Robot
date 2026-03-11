@@ -1,0 +1,21 @@
+{
+  "camera_capture": {
+    "width": 960,
+    "height": 540,
+    "fps": 40,
+    "use_mjpg": true,
+    "auto_exposure": false,
+    "exposure": -6.300000000000001,
+    "auto_focus": false,
+    "focus": 25.0,
+    "gain": 72.0,
+    "brightness": 71.0
+  },
+  "aruco_upscale": {
+    "upscale_factors": [
+      2.4,
+      3.2,
+      4.0
+    ]
+  }
+}
